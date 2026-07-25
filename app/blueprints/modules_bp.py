@@ -8,7 +8,13 @@ import shutil
 from flask import Blueprint, jsonify, request
 
 from app.module_download import download_github_directory, fetch_registry as fetch_module_registry
-from app.module_loader import ID_PATTERN, validate_manifest
+from app.module_loader import (
+    ID_PATTERN,
+    ManifestError,
+    discover_modules,
+    evaluate_module_secret_ownership,
+    validate_manifest,
+)
 from app.module_paths import get_modules_dir
 from app.path_safety import safe_child_path
 from app.theme_registry import download_theme, fetch_registry as fetch_theme_registry
@@ -17,6 +23,14 @@ from app.web import get_config_manager, get_module_loader, require_auth
 log = logging.getLogger("docsis.modules")
 
 modules_bp = Blueprint("modules_bp", __name__)
+
+
+def _remove_downloaded_module(modules_dir, target_dir):
+    """Remove a failed download only when it resolves below the module root."""
+    real_base = os.path.realpath(modules_dir)
+    real_target = os.path.realpath(target_dir)
+    if real_target.startswith(real_base + os.sep):
+        shutil.rmtree(real_target, ignore_errors=True)
 
 
 def _serialize_module(mod):
@@ -363,18 +377,36 @@ def api_modules_install():
         return jsonify({"success": False, "error": "Invalid path"}), 400
     manifest_path = _real_manifest
     if not os.path.isfile(manifest_path):
-        shutil.rmtree(target_dir, ignore_errors=True)
-        return jsonify({"success": False, "error": "Downloaded module missing manifest.json"}), 500
+        _remove_downloaded_module(modules_dir, target_dir)
+        return jsonify({"success": False, "error": "Invalid module manifest"}), 422
 
     try:
         with open(manifest_path) as f:
             manifest = json.load(f)
-        validate_manifest(manifest, target_dir)
+        validate_manifest(manifest, target_dir, builtin=False)
         if manifest.get("id") != mod_id:
-            raise ValueError(f"Manifest ID '{manifest.get('id')}' does not match requested ID '{mod_id}'")
-    except Exception as e:
-        shutil.rmtree(target_dir, ignore_errors=True)
-        return jsonify({"success": False, "error": f"Invalid module: {e}"}), 500
+            raise ManifestError("Manifest ID does not match requested ID")
+
+        builtin_modules = []
+        if loader:
+            builtin_modules = [module for module in loader.get_modules() if module.builtin]
+        builtin_ids = {module.id for module in builtin_modules}
+        community_modules = discover_modules(
+            [modules_dir],
+            known_ids=builtin_ids,
+        )
+        _, _, ownership_errors = evaluate_module_secret_ownership(
+            [*builtin_modules, *community_modules]
+        )
+        if mod_id in ownership_errors:
+            raise ManifestError("Module secret ownership conflict")
+    except (json.JSONDecodeError, OSError, ManifestError):
+        _remove_downloaded_module(modules_dir, target_dir)
+        return jsonify({"success": False, "error": "Invalid module manifest"}), 422
+    except Exception:
+        _remove_downloaded_module(modules_dir, target_dir)
+        log.exception("Unexpected module manifest validation failure")
+        return jsonify({"success": False, "error": "Module validation failed"}), 500
 
     # Persist as disabled-by-default
     config_mgr = get_config_manager()
@@ -418,7 +450,7 @@ def api_modules_uninstall():
         if mod and mod.builtin:
             return jsonify({"success": False, "error": "Cannot uninstall built-in module"}), 403
 
-    shutil.rmtree(target_dir, ignore_errors=True)
+    _remove_downloaded_module(modules_dir, target_dir)
 
     # Remove from disabled_modules if present
     config_mgr = get_config_manager()
