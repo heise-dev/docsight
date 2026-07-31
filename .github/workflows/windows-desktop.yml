@@ -55,12 +55,16 @@ jobs:
       - name: Resolve artifact version
         id: version
         shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_VERSION: ${{ github.event.release.tag_name }}
+          DISPATCH_VERSION: ${{ inputs.version }}
         run: |
           $version = ""
-          if ("${{ github.event_name }}" -eq "release") {
-            $version = "${{ github.event.release.tag_name }}"
-          } elseif ("${{ github.event_name }}" -eq "workflow_dispatch" -and -not [string]::IsNullOrWhiteSpace("${{ inputs.version }}")) {
-            $version = "${{ inputs.version }}".Trim()
+          if ($env:EVENT_NAME -eq "release") {
+            $version = $env:RELEASE_VERSION
+          } elseif ($env:EVENT_NAME -eq "workflow_dispatch" -and $env:DISPATCH_VERSION.Length -gt 0) {
+            $version = $env:DISPATCH_VERSION
           } else {
             $version = (git describe --tags --always --dirty).Trim()
           }

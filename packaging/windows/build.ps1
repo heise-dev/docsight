@@ -15,8 +15,13 @@ $DistRoot = Join-Path $ScriptDir "dist"
 $VenvRoot = Join-Path $BuildRoot ".venv"
 $VenvPython = Join-Path $VenvRoot "Scripts\python.exe"
 $VersionFile = Join-Path $BuildRoot "VERSION"
+$VersionInfoFile = Join-Path $BuildRoot "DOCSight-version.txt"
 $SpecFile = Join-Path $ScriptDir "docsight.spec"
+$VersionScript = Join-Path $ScriptDir "pe_version.py"
+$VerifierScript = Join-Path $ScriptDir "verify_pe.py"
+$IconFile = Join-Path $ScriptDir "docsight.ico"
 $BundleDir = Join-Path $DistRoot "DOCSight"
+$Executable = Join-Path $BundleDir "DOCSight.exe"
 
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = $DistRoot
@@ -48,8 +53,8 @@ function Invoke-HostPython {
 }
 
 function Get-BuildVersion {
-    if (-not [string]::IsNullOrWhiteSpace($Version)) {
-        return $Version.Trim()
+    if ($Version.Length -gt 0) {
+        return $Version
     }
 
     try {
@@ -73,7 +78,6 @@ $ResolvedVersion = Get-BuildVersion
 $SafeVersion = ConvertTo-SafeFileName $ResolvedVersion
 
 New-Item -ItemType Directory -Force -Path $BuildRoot, $DistRoot, $OutputDirectory | Out-Null
-[System.IO.File]::WriteAllText($VersionFile, "$ResolvedVersion`n", [System.Text.UTF8Encoding]::new($false))
 
 if (-not (Test-Path $VenvPython)) {
     Invoke-HostPython -m venv $VenvRoot
@@ -87,6 +91,9 @@ if ($LASTEXITCODE -ne 0 -or $PointerSize -ne "8") {
     throw "DOCSight Windows builds require a 64-bit Python runtime."
 }
 
+Invoke-Checked $VenvPython $VersionScript --label=$ResolvedVersion --output $VersionInfoFile
+[System.IO.File]::WriteAllText($VersionFile, "$ResolvedVersion`n", [System.Text.UTF8Encoding]::new($false))
+
 Invoke-Checked $VenvPython -m pip install --upgrade pip
 Invoke-Checked $VenvPython -m pip install --require-hashes -r (Join-Path $ScriptDir "requirements-runtime-windows.txt")
 Invoke-Checked $VenvPython -m pip install --require-hashes -r (Join-Path $ScriptDir "requirements-build.txt")
@@ -96,6 +103,7 @@ if (Test-Path $BundleDir) {
 }
 
 Invoke-Checked $VenvPython -m PyInstaller --noconfirm --clean --distpath $DistRoot --workpath (Join-Path $BuildRoot "pyinstaller") $SpecFile
+Invoke-Checked $VenvPython $VerifierScript --exe $Executable --label=$ResolvedVersion --icon $IconFile
 
 $ZipPath = Join-Path $OutputDirectory "DOCSight-Desktop-Preview-win64-$SafeVersion.zip"
 $HashPath = "$ZipPath.sha256"

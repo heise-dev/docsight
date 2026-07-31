@@ -26,6 +26,26 @@ Record these values before starting:
   ```
 
 - [ ] Extract the ZIP into a normal user-writable folder such as `Downloads\DOCSight`.
+- [ ] In Explorer's small, medium, large, and extra-large icon views, confirm
+  `DOCSight.exe` shows the DOCSight rings mark with a transparent background
+  and remains recognizable without clipped or muddy small-size artwork.
+- [ ] Right-click `DOCSight.exe`, select **Properties** → **Details**, and verify:
+
+  | Property | Expected value |
+  |---|---|
+  | File description | `DOCSight Desktop Preview` |
+  | Type | `Application` |
+  | File version | Numeric four-part version documented in `README.md` |
+  | Product name | `DOCSight` |
+  | Product version | Exact build label / artifact version |
+  | Copyright | `Copyright (c) 2026 Dennis Braun` |
+  | Company | `DOCSight Project` |
+  | Original filename | `DOCSight.exe` |
+
+- [ ] For a release label such as `v2026-07-29.1`, confirm **File version** is
+  `2026.7.29.1` and **Product version** is exactly `v2026-07-29.1`. For a
+  suffixed or development label, record the numeric **File version** and
+  confirm a repeated build with that exact label shows the same value.
 - [ ] Double-click `DOCSight.exe`.
 - [ ] If SmartScreen appears, confirm the documented flow works: **More info** → **Run anyway** after checksum verification.
 - [ ] A centered DOCSight startup window is visible within **under two seconds** of double-clicking, before slow startup completes.
@@ -147,6 +167,8 @@ successful exclusive reopen of created `DATA_DIR` files.
 | Area | Pass / Fail | Notes |
 |---|---|---|
 | Checksum and extraction | | |
+| Explorer executable icon | | |
+| Explorer Details properties | | |
 | Double-click startup | | |
 | Immediate status under two seconds | | |
 | Startup phases and URL copy | | |

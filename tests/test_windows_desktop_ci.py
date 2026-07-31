@@ -232,6 +232,15 @@ def test_windows_desktop_workflow_builds_smokes_and_uploads_bundle():
     assert "DOCSight-Desktop-Preview-win64-*.zip" not in upload_block
 
 
+def test_windows_desktop_workflow_preserves_dispatch_version_label():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    version_block = named_step_block(workflow, "Resolve artifact version")
+
+    assert "DISPATCH_VERSION: ${{ inputs.version }}" in version_block
+    assert "$version = $env:DISPATCH_VERSION" in version_block
+    assert "$env:DISPATCH_VERSION.Trim()" not in version_block
+
+
 def test_windows_desktop_workflow_attaches_release_assets():
     workflow = WORKFLOW.read_text(encoding="utf-8")
 

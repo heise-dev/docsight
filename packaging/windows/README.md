@@ -166,7 +166,31 @@ intended release scope, and verification guidance.
 The build uses a Windows-resolved, hash-pinned runtime install from
 `requirements-runtime-windows.txt` and a cross-platform, hash-pinned build-tool
 install from `requirements-build.txt`. The generated `VERSION` file is bundled
-next to the packaged `app/` tree so `/health` reports the build version.
+next to the packaged `app/` tree so `/health` reports the build version. The
+same label is stored unchanged as the executable's human-readable
+`ProductVersion`.
+
+### Executable resources and version mapping
+
+`DOCSight.exe` uses the checked-in `docsight.ico`, derived from
+`app/static/icon.png`, with 16, 24, 32, 48, 64, 128, and 256 pixel images. The
+build also generates a PyInstaller VERSIONINFO resource under the ignored
+`packaging/windows/build/` directory.
+
+Release labels in the form `vYYYY-MM-DD.N` map directly to numeric PE versions
+`YYYY.M.D.N`; for example, `v2026-07-29.1` maps to `2026.7.29.1`. A suffixed
+date label such as `v2026-07-29.1-8-ga5344fe` keeps `2026.7.29` and derives its
+fourth component from a namespaced SHA-256 hash of the complete label. Other
+development or workflow-dispatch labels use four 16-bit words from the same
+namespaced hash. The mapping is stable, and every numeric component is between
+0 and 65535. Empty, whitespace-only, overlong, control-character, surrogate,
+and Unicode noncharacter labels are rejected before packaging.
+
+After PyInstaller returns, `build.ps1` reads the actual built PE with `pefile`.
+It checks the fixed numeric versions, every expected version string, and the
+icon group metadata and image payloads against `docsight.ico`. A missing or
+stale resource stops the build before ZIP creation. Successful output includes
+the verified file/product versions and icon sizes.
 
 ## CI automation
 
@@ -214,11 +238,12 @@ infrastructure and have no effect during normal interactive startup.
 restricted to a direct child path under the active per-user DOCSight directory.
 It is local packaged-smoke infrastructure, not an HTTP endpoint.
 
-The automated smoke verifies non-interactive process, logging, listener, API,
-data-reopen, and recovery contracts. A GitHub-hosted runner does not prove that
-the notification-area icon is visible or that mouse/menu interaction works.
-Use `QA-CHECKLIST.md` for those interactive Windows checks, visual quality, and
-DPI scaling.
+The PE resource verifier and automated smoke verify executable resources,
+non-interactive process, logging, listener, API, data-reopen, and recovery
+contracts. A GitHub-hosted runner does not prove that Explorer renders the icon
+well, that the notification-area icon is visible, or that mouse/menu
+interaction works. Use `QA-CHECKLIST.md` for those interactive Windows checks,
+visual quality, properties display, and DPI scaling.
 
 ## Packaging boundary
 
@@ -231,12 +256,11 @@ copies only the application/runtime paths it needs, and `.dockerignore` keeps th
 Windows packaging tree out of the Docker build context as well.
 
 The runtime adds `pystray` as a small notification-area adapter. Pillow was
-already present and supplies the generated preview image; final application
-icon and PE version metadata remain separate work.
+already present and supplies the generated notification-area image. Executable
+branding and PE metadata remain isolated under `packaging/windows/`.
 
 ## Non-goals for this slice
 
 - No WebView shell, auto-start, updater, installer, MSI, or MSIX.
-- No final application icon or PE version metadata.
 - No native Windows ICMP/traceroute diagnostics.
 - No code-signing integration while provider onboarding is pending.
