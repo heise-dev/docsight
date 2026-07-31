@@ -182,6 +182,15 @@ def test_version_info_contains_approved_strings_and_exact_product_label():
         assert repr(value) in rendered
 
 
+def test_version_info_uses_pyinstaller_fixed_file_info_constructor():
+    pe_version = load_windows_module("pe_version")
+
+    rendered = pe_version.render_version_info("v2026-07-29.1")
+
+    assert "ffi=FixedFileInfo(" in rendered
+    assert "VSFixedFileInfo" not in rendered
+
+
 def test_pe_verifier_rejects_stale_fixed_or_string_versions():
     pe_version = load_windows_module("pe_version")
     verify_pe = load_windows_module("verify_pe")
