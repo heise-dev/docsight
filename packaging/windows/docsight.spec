@@ -4,9 +4,10 @@
 Build with:
     pyinstaller packaging/windows/docsight.spec --noconfirm --clean
 
-The PowerShell build wrapper prepares packaging/windows/build/VERSION before
-calling this spec. Data files are placed so app/version.py can resolve
-<app package>/../VERSION inside PyInstaller's onedir runtime root.
+The PowerShell build wrapper prepares packaging/windows/build/VERSION and the
+PE version resource before calling this spec. Data files are placed so
+app/version.py can resolve <app package>/../VERSION inside PyInstaller's onedir
+runtime root.
 """
 
 from pathlib import Path
@@ -15,6 +16,8 @@ ROOT = Path(SPECPATH).parents[1]
 APP_DIR = ROOT / "app"
 BUILD_DIR = Path(SPECPATH) / "build"
 VERSION_FILE = BUILD_DIR / "VERSION"
+VERSION_INFO_FILE = BUILD_DIR / "DOCSight-version.txt"
+ICON_FILE = Path(SPECPATH) / "docsight.ico"
 
 EXCLUDED_DIRS = {"__pycache__", ".pytest_cache"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".db", ".sqlite", ".sqlite3"}
@@ -51,9 +54,12 @@ def collect_app_hiddenimports():
     return sorted(set(hiddenimports))
 
 
-if not VERSION_FILE.exists():
-    VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-    VERSION_FILE.write_text("dev\n", encoding="utf-8")
+for required_resource in (VERSION_FILE, VERSION_INFO_FILE, ICON_FILE):
+    if not required_resource.is_file():
+        raise FileNotFoundError(
+            f"Missing generated packaging resource: {required_resource}. "
+            "Run packaging/windows/build.ps1."
+        )
 
 
 datas = collect_app_datas() + [(str(VERSION_FILE), ".")]
@@ -102,6 +108,8 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(ICON_FILE),
+    version=str(VERSION_INFO_FILE),
 )
 coll = COLLECT(
     exe,
