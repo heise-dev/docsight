@@ -241,7 +241,7 @@ function loadApiTokens() {
     var body = document.getElementById('api-tokens-body');
     var empty = document.getElementById('api-tokens-empty');
     if (!table || !body) return;
-    fetch('/api/tokens').then(function(r) { return r.json(); }).then(function(data) {
+    fetch(docsightUrl('/api/tokens')).then(function(r) { return r.json(); }).then(function(data) {
         var tokens = (data.tokens || []).filter(function(t) { return !t.revoked; });
         while (body.firstChild) body.removeChild(body.firstChild);
         if (tokens.length === 0) {
@@ -284,7 +284,7 @@ function createApiToken() {
     var inp = document.getElementById('api-token-name');
     var name = (inp.value || '').trim();
     if (!name) { inp.focus(); return; }
-    fetch('/api/tokens', {
+    fetch(docsightUrl('/api/tokens'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: name})
@@ -317,7 +317,7 @@ function revokeToken(id, name) {
         danger: true
     }).then(function(confirmed) {
         if (!confirmed) return null;
-        return fetch('/api/tokens/' + id, {method: 'DELETE'});
+        return fetch(docsightUrl('/api/tokens/' + id), {method: 'DELETE'});
     })
     .then(function(r) { return r ? r.json() : null; })
     .then(function(data) {
@@ -411,7 +411,7 @@ function onIspChange() {
         'o2': '/static/img/providers/o2.svg'
     };
     if (sel.value && sel.value !== '__other__') {
-        icon.src = iconMap[isp] || '/static/img/providers/generic.svg';
+        icon.src = docsightUrl(iconMap[isp] || '/static/img/providers/generic.svg');
         icon.alt = sel.value;
         icon.style.display = 'block';
         icon.style.opacity = iconMap[isp] ? '1' : '0.7';
@@ -505,7 +505,7 @@ function testModem() {
     el.appendChild(document.createTextNode(' ' + T.testing));
     setModemStatus('testing', T.testing);
     var data = getFormData();
-    fetch('/api/test-modem', {
+    fetch(docsightUrl('/api/test-modem'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({modem_type: data.modem_type, modem_url: data.modem_url, modem_user: data.modem_user, modem_password: data.modem_password})
@@ -553,7 +553,7 @@ function testMqtt() {
     el.appendChild(document.createTextNode(' ' + T.testing));
     setMqttStatus('testing', T.testing);
     var data = getFormData();
-    fetch('/api/test-mqtt', {
+    fetch(docsightUrl('/api/test-mqtt'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({mqtt_host: data.mqtt_host, mqtt_port: data.mqtt_port, mqtt_user: data.mqtt_user, mqtt_password: data.mqtt_password})
@@ -600,7 +600,7 @@ function testSpeedtest() {
     el.appendChild(span);
     el.appendChild(document.createTextNode(' ' + T.testing));
     var data = getFormData();
-    fetch('/api/test-speedtest', {
+    fetch(docsightUrl('/api/test-speedtest'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
@@ -653,7 +653,7 @@ function clearSpeedtestCache(btn) {
     }).then(function(confirmed) {
         if (!confirmed) return null;
         btn.disabled = true;
-        return fetch('/api/speedtest/cache', { method: 'DELETE' });
+        return fetch(docsightUrl('/api/speedtest/cache'), { method: 'DELETE' });
     })
         .then(function(r) { return r ? r.json() : null; })
         .then(function(res) {
@@ -685,7 +685,7 @@ function testNotifications() {
     span.textContent = '\u23F3';
     el.appendChild(span);
     el.appendChild(document.createTextNode(' ' + (T.notify_test_sending || 'Sending test notification...')));
-    fetch('/api/notifications/test', {
+    fetch(docsightUrl('/api/notifications/test'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: '{}'
@@ -752,7 +752,7 @@ function refreshPwaPushStatus() {
         return Promise.resolve(null);
     }
     return Promise.all([
-        fetch('/api/notifications/pwa/status').then(function(r) { return r.json(); }),
+        fetch(docsightUrl('/api/notifications/pwa/status')).then(function(r) { return r.json(); }),
         _getCurrentPwaSubscription()
     ])
         .then(function(values) {
@@ -793,7 +793,7 @@ function subscribePwaPush() {
                 });
             })
             .then(function(subscription) {
-                return fetch('/api/notifications/pwa/subscribe', {
+                return fetch(docsightUrl('/api/notifications/pwa/subscribe'), {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({subscription: subscription.toJSON()})
@@ -819,7 +819,7 @@ function unsubscribePwaPush() {
             if (!subscription) return null;
             var endpoint = subscription.endpoint;
             return subscription.unsubscribe().then(function() {
-                return fetch('/api/notifications/pwa/unsubscribe', {
+                return fetch(docsightUrl('/api/notifications/pwa/unsubscribe'), {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({endpoint: endpoint})
@@ -1081,7 +1081,7 @@ function _markModuleStatesSaved(states) {
 function _saveModuleStatesIfNeeded(states) {
     states = states || _getPendingModuleStates();
     if (states.length === 0) return Promise.resolve({ success: true, restart_required: false });
-    return fetch('/api/modules/batch', {
+    return fetch(docsightUrl('/api/modules/batch'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ modules: states })
@@ -1170,7 +1170,7 @@ function _saveAllSettings(options) {
     var data = getFormData();
     var savedFormBaseline = _serializeSettingsForm(form);
     var moduleStates = _getPendingModuleStates();
-    return fetch('/api/config', {
+    return fetch(docsightUrl('/api/config'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(data)
@@ -1300,7 +1300,7 @@ function downloadBackup() {
     span.textContent = '\u23F3';
     el.appendChild(span);
     el.appendChild(document.createTextNode(' ' + (T.backup_creating || 'Creating backup...')));
-    fetch('/api/backup', { method: 'POST' })
+    fetch(docsightUrl('/api/backup'), { method: 'POST' })
     .then(function(r) {
         if (!r.ok) return r.json().then(function(j) { throw new Error(j.error || 'Backup failed'); });
         var cd = r.headers.get('Content-Disposition') || '';
@@ -1345,7 +1345,7 @@ function backupNow() {
     span.textContent = '\u23F3';
     el.appendChild(span);
     el.appendChild(document.createTextNode(' ' + (T.backup_creating || 'Creating backup...')));
-    fetch('/api/backup/scheduled', { method: 'POST' })
+    fetch(docsightUrl('/api/backup/scheduled'), { method: 'POST' })
     .then(function(r) { return r.json(); })
     .then(function(res) {
         el.textContent = '';
@@ -1378,7 +1378,7 @@ function backupNow() {
 function loadBackupList() {
     var el = document.getElementById('backup-list');
     if (!el) return;
-    fetch('/api/backup/list')
+    fetch(docsightUrl('/api/backup/list'))
     .then(function(r) { return r.json(); })
     .then(function(res) {
         var backups = Array.isArray(res) ? res : (res && Array.isArray(res.backups) ? res.backups : []);
@@ -1460,7 +1460,7 @@ function deleteBackup(filename) {
         danger: true
     }).then(function(confirmed) {
         if (!confirmed) return null;
-        return fetch('/api/backup/' + encodeURIComponent(filename), { method: 'DELETE' });
+        return fetch(docsightUrl('/api/backup/' + encodeURIComponent(filename)), { method: 'DELETE' });
     })
     .then(function(r) { return r ? r.json() : null; })
     .then(function(res) {
@@ -1511,7 +1511,7 @@ function browseTo(path) {
     loadingDiv.textContent = '\u23F3 ' + (T.loading || 'Loading...');
     dirs.appendChild(loadingDiv);
     if (status) status.textContent = T.loading || 'Loading...';
-    fetch('/api/browse?path=' + encodeURIComponent(path))
+    fetch(docsightUrl('/api/browse?path=' + encodeURIComponent(path)))
     .then(function(r) { return r.json(); })
     .then(function(res) {
         dirs.textContent = '';
@@ -1820,7 +1820,7 @@ function applyPreviewedTheme() {
 function applyTheme(themeId) {
     _guardUnsaved().then(function(proceed) {
         if (!proceed) return;
-        fetch('/api/modules/' + themeId + '/enable', { method: 'POST' })
+        fetch(docsightUrl('/api/modules/' + themeId + '/enable'), { method: 'POST' })
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data.success) {
@@ -1862,7 +1862,7 @@ function refreshRegistry() {
     loading.appendChild(p);
     gallery.appendChild(loading);
 
-    fetch('/api/themes/registry')
+    fetch(docsightUrl('/api/themes/registry'))
         .then(function(r) { return r.json(); })
         .then(function(themes) {
             gallery.textContent = '';
@@ -1931,7 +1931,7 @@ function refreshRegistry() {
 }
 
 function installTheme(themeId, downloadUrl) {
-    fetch('/api/themes/install', {
+    fetch(docsightUrl('/api/themes/install'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: themeId, download_url: downloadUrl }),
@@ -1964,7 +1964,7 @@ function loadSmartCaptureHistory() {
     if (empty) empty.style.display = 'none';
     if (tableWrap) tableWrap.style.display = 'none';
 
-    fetch('/api/smart-capture/executions?limit=50')
+    fetch(docsightUrl('/api/smart-capture/executions?limit=50'))
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (loading) loading.style.display = 'none';
@@ -2069,7 +2069,7 @@ function refreshModuleRegistry() {
     if (empty) empty.style.display = 'none';
     gallery.style.display = 'none';
 
-    fetch('/api/modules/registry')
+    fetch(docsightUrl('/api/modules/registry'))
         .then(function(r) { return r.json(); })
         .then(function(modules) {
             if (loading) loading.style.display = 'none';
@@ -2160,17 +2160,24 @@ function _renderRegistryCards(gallery, modules) {
     });
 }
 
-/* Two-step install: first click shows "Confirm?", second click installs */
-function installModule(e, id, downloadUrl) {
+function _runModuleAction(e, id, action, downloadUrl) {
     var btn = e.currentTarget;
+    var installing = action === 'install';
+    var idleClass = installing ? 'btn-install' : 'btn-uninstall';
+    var idleText = installing
+        ? (T.extensions_install || 'Install')
+        : (T.extensions_uninstall || 'Uninstall');
+    var failedText = installing
+        ? (T.extensions_install_failed || 'Installation failed')
+        : (T.extensions_uninstall_failed || 'Uninstall failed');
     if (btn.dataset.confirmPending !== 'true') {
         btn.dataset.confirmPending = 'true';
         btn.className = 'btn btn-sm btn-confirm';
         btn.textContent = T.extensions_confirm || 'Confirm?';
         btn._resetTimer = setTimeout(function() {
             btn.dataset.confirmPending = 'false';
-            btn.className = 'btn btn-sm btn-install';
-            btn.textContent = T.extensions_install || 'Install';
+            btn.className = 'btn btn-sm ' + idleClass;
+            btn.textContent = idleText;
         }, 3000);
         return;
     }
@@ -2179,75 +2186,45 @@ function installModule(e, id, downloadUrl) {
     btn.disabled = true;
     btn.textContent = '...';
 
-    fetch('/api/modules/install', {
+    var payload = {id: id};
+    if (installing) payload.download_url = downloadUrl;
+    fetch(docsightUrl('/api/modules/' + action), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({id: id, download_url: downloadUrl}),
+        body: JSON.stringify(payload),
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
         if (data.success) {
-            showToast(T.extensions_install_success || 'Module installed successfully', true);
+            showToast(
+                installing
+                    ? (T.extensions_install_success || 'Module installed successfully')
+                    : (T.extensions_uninstall_success || 'Module uninstalled'),
+                true
+            );
             var banner = document.getElementById('module-restart-banner');
             if (banner) { banner.style.display = ''; if (typeof lucide !== 'undefined') lucide.createIcons({nodes: [banner]}); }
             refreshModuleRegistry();
         } else {
-            showToast(data.error || (T.extensions_install_failed || 'Installation failed'), false);
+            showToast(data.error || failedText, false);
             btn.disabled = false;
-            btn.className = 'btn btn-sm btn-install';
-            btn.textContent = T.extensions_install || 'Install';
+            btn.className = 'btn btn-sm ' + idleClass;
+            btn.textContent = idleText;
         }
     })
     .catch(function(err) {
-        showToast((T.extensions_install_failed || 'Installation failed') + ': ' + err.message, false);
+        showToast(failedText + ': ' + err.message, false);
         btn.disabled = false;
-        btn.className = 'btn btn-sm btn-install';
-        btn.textContent = T.extensions_install || 'Install';
+        btn.className = 'btn btn-sm ' + idleClass;
+        btn.textContent = idleText;
     });
 }
 
-/* Two-step uninstall */
-function uninstallModule(e, id) {
-    var btn = e.currentTarget;
-    if (btn.dataset.confirmPending !== 'true') {
-        btn.dataset.confirmPending = 'true';
-        btn.className = 'btn btn-sm btn-confirm';
-        btn.textContent = T.extensions_confirm || 'Confirm?';
-        btn._resetTimer = setTimeout(function() {
-            btn.dataset.confirmPending = 'false';
-            btn.className = 'btn btn-sm btn-uninstall';
-            btn.textContent = T.extensions_uninstall || 'Uninstall';
-        }, 3000);
-        return;
-    }
-    clearTimeout(btn._resetTimer);
-    btn.dataset.confirmPending = 'false';
-    btn.disabled = true;
-    btn.textContent = '...';
+/* Thin public entry points retained for existing card click handlers. */
+function installModule(e, id, downloadUrl) {
+    _runModuleAction(e, id, 'install', downloadUrl);
+}
 
-    fetch('/api/modules/uninstall', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({id: id}),
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-        if (data.success) {
-            showToast(T.extensions_uninstall_success || 'Module uninstalled', true);
-            var banner = document.getElementById('module-restart-banner');
-            if (banner) { banner.style.display = ''; if (typeof lucide !== 'undefined') lucide.createIcons({nodes: [banner]}); }
-            refreshModuleRegistry();
-        } else {
-            showToast(data.error || (T.extensions_uninstall_failed || 'Uninstall failed'), false);
-            btn.disabled = false;
-            btn.className = 'btn btn-sm btn-uninstall';
-            btn.textContent = T.extensions_uninstall || 'Uninstall';
-        }
-    })
-    .catch(function(err) {
-        showToast((T.extensions_uninstall_failed || 'Uninstall failed') + ': ' + err.message, false);
-        btn.disabled = false;
-        btn.className = 'btn btn-sm btn-uninstall';
-        btn.textContent = T.extensions_uninstall || 'Uninstall';
-    });
+function uninstallModule(e, id) {
+    _runModuleAction(e, id, 'uninstall');
 }

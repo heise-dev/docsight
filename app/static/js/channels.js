@@ -93,10 +93,11 @@ function parseChannelHash() {
     var hash = location.hash.replace('#', '');
     var qIdx = hash.indexOf('?');
     if (qIdx === -1) return {};
+    var query = hash.substring(qIdx + 1);
+    decodeURI(query); // Preserve the prior URIError for malformed percent escapes.
     var params = {};
-    hash.substring(qIdx + 1).split('&').forEach(function(pair) {
-        var kv = pair.split('=');
-        if (kv.length === 2) params[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1]);
+    new URLSearchParams(query.replace(/\+/g, '%2B')).forEach(function(value, key) {
+        params[key] = value;
     });
     return params;
 }
@@ -199,7 +200,7 @@ function initChannelView() {
                 var selectorKeys = params.selectors ? params.selectors.split(',') : [];
                 var channelIds = params.channels ? params.channels.split(',') : [];
                 var dir = params.dir || 'ds';
-                fetch('/api/channels')
+                fetch(docsightUrl('/api/channels'))
                     .then(function(r) { return r.json(); })
                     .then(function(data) {
                         var available = dir === 'ds' ? (data.ds_channels || []) : (data.us_channels || []);
@@ -287,7 +288,7 @@ var _channelsLoaded = false;
 function loadChannelList(callback) {
     if (_channelsLoaded) { if (callback) callback(); return; }
     var sel = document.getElementById('channel-select');
-    fetch('/api/channels')
+    fetch(docsightUrl('/api/channels'))
         .then(function(r) { return r.json(); })
         .then(function(data) {
             sel.innerHTML = '<option value="">' + (T.select_channel || 'Select Channel') + '</option>';
@@ -404,7 +405,7 @@ function _getChannelWeatherRange(timestamps) {
 function _fetchChannelWeatherForTimestamps(timestamps) {
     var wr = _getChannelWeatherRange(timestamps);
     if (!wr) return Promise.resolve([]);
-    var url = '/api/weather/range?start=' + encodeURIComponent(wr.start) + '&end=' + encodeURIComponent(wr.end);
+    var url = docsightUrl('/api/weather/range?start=' + encodeURIComponent(wr.start) + '&end=' + encodeURIComponent(wr.end));
     return fetch(url).then(function(r) { return r.json(); }).catch(function() { return []; });
 }
 
@@ -671,7 +672,7 @@ function loadChannelTimeline() {
     var identityParam = ref.usesSelector
         ? 'selector=' + encodeURIComponent(ref.selector)
         : 'channel_id=' + encodeURIComponent(ref.legacyId);
-    fetch('/api/channel-history?' + identityParam + '&direction=' + direction + '&range=' + encodeURIComponent(days))
+    fetch(docsightUrl('/api/channel-history?' + identityParam + '&direction=' + direction + '&range=' + encodeURIComponent(days)))
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (requestId !== _channelTimelineRequestSeq) return;
@@ -809,7 +810,7 @@ function loadCompareChannelList(data) {
         populateCompareChannelList(data);
         return;
     }
-    fetch('/api/channels')
+    fetch(docsightUrl('/api/channels'))
         .then(function(r) { return r.json(); })
         .then(function(payload) {
             populateCompareChannelList(payload);
@@ -881,7 +882,7 @@ window.addCompareChannel = addCompareChannel;
 
 function addAllCompareChannels() {
     var dir = getCompareDirection();
-    fetch('/api/channels')
+    fetch(docsightUrl('/api/channels'))
         .then(function(r) { return r.json(); })
         .then(function(data) {
             var channels = dir === 'ds' ? (data.ds_channels || []) : (data.us_channels || []);
@@ -1130,7 +1131,7 @@ function loadCompareCharts() {
     chartsEl.style.display = 'none';
     emptyEl.style.display = 'none';
 
-    fetch('/api/channel-compare?' + identityName + '=' + encodeURIComponent(identities) + '&direction=' + dir + '&range=' + encodeURIComponent(days))
+    fetch(docsightUrl('/api/channel-compare?' + identityName + '=' + encodeURIComponent(identities) + '&direction=' + dir + '&range=' + encodeURIComponent(days)))
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (requestId !== _compareRequestSeq) return;

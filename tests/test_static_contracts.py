@@ -7,7 +7,10 @@ import re
 import subprocess
 from collections import Counter
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
+from urllib.parse import urljoin, urlsplit
+
+from jinja2 import Template
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "app"
@@ -47,8 +50,20 @@ STATIC_JS_CSS_TAG_RE = re.compile(
     re.IGNORECASE,
 )
 STATIC_URL_FOR_JS_CSS_TAG_RE = re.compile(
-    r"<(?:script|link)\b[^>]+(?:src|href)=['\"](\{\{\s*url_for\('static',\s*filename='[^']+\.(?:js|css)'\)\s*\}\}(?:\?[^'\"]*)?)['\"]",
+    r"<(?:script|link)\b[^>]+(?:src|href)=(['\"])(\{\{.*?\}\}(?:\?[^'\"]*)?)\1",
     re.IGNORECASE,
+)
+STATIC_URL_FOR_RE = re.compile(
+    r"url_for\(\s*['\"]static['\"]\s*,\s*filename\s*=\s*['\"]([^'\"]+)['\"]([^)]*)\)"
+)
+MODULE_STATIC_LITERAL_RE = re.compile(
+    r"module_static_url\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]([^)]*)\)"
+)
+MODULE_STATIC_DYNAMIC_RE = re.compile(
+    r"module_static_url\(\s*mod\.id\s*,\s*['\"]([^'\"]+)['\"]([^)]*)\)"
+)
+ROOT_RELATIVE_ATTRIBUTE_RE = re.compile(
+    r"<[^>]*\b(?:href|src|action)\s*=\s*['\"]/"
 )
 MISMATCHED_HEADING_RE = re.compile(r"<(span|h2)\b[^>]*>[^\n]*</(?!\1>)(span|h2)>")
 
@@ -83,14 +98,22 @@ def local_asset_path(url: str, module_dirs: dict[str, Path] | None = None) -> Pa
     return None
 
 
-def collect_literal_asset_urls(paths: Iterable[Path]) -> dict[Path, set[str]]:
-    urls: dict[Path, set[str]] = {}
-    for path in paths:
-        text = path.read_text(encoding="utf-8")
-        matches = {match.group(1) for match in STATIC_URL_RE.finditer(text)}
-        if matches:
-            urls[path] = matches
+def collect_template_asset_urls(text: str) -> set[str]:
+    """Return statically resolvable literal and Jinja-generated asset URLs."""
+    urls = {match.group(1) for match in STATIC_URL_RE.finditer(text)}
+    urls.update(f"/static/{match.group(1)}" for match in STATIC_URL_FOR_RE.finditer(text))
+    urls.update(
+        f"/modules/{match.group(1)}/static/{match.group(2)}"
+        for match in MODULE_STATIC_LITERAL_RE.finditer(text)
+    )
     return urls
+
+
+def generated_js_css_reference_is_versioned(value: str) -> bool:
+    return (
+        "?v={{ version|urlencode }}" in value
+        or re.search(r"\bv\s*=\s*version\b", value) is not None
+    )
 
 
 def collect_required_lucide_icons() -> set[str]:
@@ -130,35 +153,45 @@ def test_lucide_bundle_is_app_subset_and_covers_rendered_icons() -> None:
 
 def test_pwa_manifest_metadata_and_declared_assets_are_valid() -> None:
     manifest = read_json(STATIC / "manifest.json")
+    manifest_url = "https://docsight.test/static/manifest.json"
 
     assert manifest["name"].startswith("DOCSight")
     assert manifest["short_name"] == "DOCSight"
     assert manifest["display"] == "standalone"
-    assert manifest["start_url"].startswith("/")
-    assert manifest["scope"] == "/"
+    assert "id" not in manifest
+    assert urljoin(manifest_url, manifest["start_url"]) == (
+        "https://docsight.test/?source=pwa"
+    )
+    assert urljoin(manifest_url, manifest["scope"]) == "https://docsight.test/"
     assert {item["form_factor"] for item in manifest["screenshots"]} == {"narrow", "wide"}
 
-    declared_assets = [icon["src"] for icon in manifest["icons"]]
-    declared_assets += [shot["src"] for shot in manifest["screenshots"]]
+    declared_assets = [urljoin(manifest_url, icon["src"]) for icon in manifest["icons"]]
+    declared_assets += [
+        urljoin(manifest_url, shot["src"]) for shot in manifest["screenshots"]
+    ]
     for shortcut in manifest["shortcuts"]:
-        assert shortcut["url"].startswith("/")
-        declared_assets.extend(icon["src"] for icon in shortcut["icons"])
+        assert urljoin(manifest_url, shortcut["url"]).startswith(
+            "https://docsight.test/?source=pwa#"
+        )
+        declared_assets.extend(
+            urljoin(manifest_url, icon["src"]) for icon in shortcut["icons"]
+        )
 
     missing = []
     for url in declared_assets:
-        path = local_asset_path(url)
+        path = local_asset_path(urlsplit(url).path)
         if path is None or not path.is_file():
             missing.append(url)
     assert missing == []
 
 
-def test_templates_reference_existing_literal_static_assets() -> None:
+def test_templates_reference_existing_static_assets() -> None:
     template_paths = sorted(TEMPLATES.rglob("*.html")) + sorted(MODULES.glob("*/templates/*.html"))
-    references = collect_literal_asset_urls(template_paths)
     module_dirs = module_id_to_dir()
 
     missing = []
-    for source, urls in references.items():
+    for source in template_paths:
+        urls = collect_template_asset_urls(source.read_text(encoding="utf-8"))
         for url in sorted(urls):
             path = local_asset_path(url, module_dirs)
             if path is not None and not path.is_file():
@@ -174,12 +207,119 @@ def test_template_static_js_and_css_urls_are_versioned() -> None:
 
     for path in template_paths:
         text = path.read_text(encoding="utf-8")
-        for match in list(STATIC_JS_CSS_TAG_RE.finditer(text)) + list(STATIC_URL_FOR_JS_CSS_TAG_RE.finditer(text)):
+        for match in STATIC_JS_CSS_TAG_RE.finditer(text):
             url = match.group(1)
             if "?v={{ version|urlencode }}" not in url:
                 offenders.append(f"{path.relative_to(ROOT)} -> {url}")
+        for match in STATIC_URL_FOR_JS_CSS_TAG_RE.finditer(text):
+            value = match.group(2)
+            if re.search(r"\.(?:js|css)(?:['\"]|\))", value) and not generated_js_css_reference_is_versioned(value):
+                offenders.append(f"{path.relative_to(ROOT)} -> {value}")
 
     assert offenders == []
+
+
+def test_template_asset_extraction_supports_url_helpers() -> None:
+    text = """
+    <link href="{{ url_for('static', filename='css/main.css', v=version) }}">
+    <script src="{{ module_static_url('docsight.bqm', 'js/bqm-chart.js', v=version) }}"></script>
+    """
+
+    assert collect_template_asset_urls(text) == {
+        "/static/css/main.css",
+        "/modules/docsight.bqm/static/js/bqm-chart.js",
+    }
+    missing = collect_template_asset_urls(
+        "{{ module_static_url('docsight.bqm', 'js/missing.js', v=version) }}"
+    )
+    assert missing == {"/modules/docsight.bqm/static/js/missing.js"}
+    assert not local_asset_path(missing.pop()).is_file()
+    assert not generated_js_css_reference_is_versioned(
+        "{{ url_for('static', filename='css/main.css') }}"
+    )
+
+
+def test_dynamic_module_asset_helpers_are_gated_by_the_matching_module_flag() -> None:
+    template_paths = sorted(TEMPLATES.rglob("*.html")) + sorted(MODULES.glob("*/templates/*.html"))
+    bindings = set()
+    for path in template_paths:
+        text = path.read_text(encoding="utf-8")
+        for match in MODULE_STATIC_DYNAMIC_RE.finditer(text):
+            loop_start = text.rfind("{% for", 0, match.start())
+            loop_header_end = text.find("%}", loop_start)
+            loop_end = text.find("{% endfor %}", match.end())
+            assert loop_start >= 0 and loop_header_end < match.start() < loop_end
+            loop_header = text[loop_start:loop_header_end + 2]
+            flag = re.search(r"\bmod\.(has_css|has_js)\b", loop_header)
+            assert flag is not None, f"{path.relative_to(ROOT)} -> {match.group(0)}"
+            bindings.add((flag.group(1), match.group(1)))
+
+    assert bindings == {("has_css", "style.css"), ("has_js", "main.js")}
+
+
+def test_disabled_bqm_does_not_resolve_or_render_fixed_module_asset() -> None:
+    index = (TEMPLATES / "index.html").read_text(encoding="utf-8")
+    guarded_script = re.search(
+        r"({%\s*if\s+modules\|selectattr\(\s*['\"]id['\"]\s*,\s*"
+        r"['\"]equalto['\"]\s*,\s*['\"]docsight\.bqm['\"]\s*\)\|list\s*%}"
+        r"\s*<script\s+src=\"{{\s*module_static_url\(\s*['\"]docsight\.bqm['\"]\s*,"
+        r"\s*['\"]js/bqm-chart\.js['\"]\s*,\s*v=version\s*\)\s*}}\"></script>"
+        r"\s*{%\s*endif\s*%})",
+        index,
+        re.DOTALL,
+    )
+    assert guarded_script is not None
+
+    helper_calls = []
+
+    def module_static_url(*args, **kwargs):
+        helper_calls.append((args, kwargs))
+        return "/must-not-render"
+
+    rendered = Template(guarded_script.group(1)).render(
+        modules=[], version="test", module_static_url=module_static_url
+    )
+
+    assert helper_calls == []
+    assert "/modules/docsight.bqm/" not in rendered
+    assert "/must-not-render" not in rendered
+
+
+def test_templates_do_not_emit_root_relative_application_attributes() -> None:
+    offenders = []
+    template_paths = sorted(TEMPLATES.rglob("*.html")) + sorted(MODULES.glob("*/templates/*.html"))
+    for path in template_paths:
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if ROOT_RELATIVE_ATTRIBUTE_RE.search(line):
+                offenders.append(f"{path.relative_to(ROOT)}:{lineno}")
+
+    assert offenders == []
+
+
+def test_server_redirects_do_not_use_literal_root_relative_targets() -> None:
+    offenders = []
+    for path in [APP / "web.py", MODULES / "backup" / "routes.py"]:
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if re.search(r"redirect\(\s*f?['\"]/", line):
+                offenders.append(f"{path.relative_to(ROOT)}:{lineno}")
+
+    assert offenders == []
+
+
+def test_setup_navigation_targets_are_server_generated() -> None:
+    setup = (TEMPLATES / "setup.html").read_text(encoding="utf-8")
+
+    assert not re.search(r"window\.location\.(?:href\s*=|assign\()\s*['\"]/", setup)
+    assert "url_for('index')" in setup
+    assert "url_for('login')" in setup
+
+
+def test_font_sources_are_relative_to_the_stylesheet() -> None:
+    fonts_css = (STATIC / "css" / "fonts.css").read_text(encoding="utf-8")
+    sources = re.findall(r"src:\s*url\(([^)]+)\)", fonts_css)
+
+    assert len(sources) == 4
+    assert all(source.startswith("../fonts/") for source in sources)
 
 
 def test_service_worker_precache_references_existing_public_assets() -> None:
@@ -291,10 +431,86 @@ def test_static_templates_keep_basic_heading_markup_well_formed() -> None:
 
 def test_snapshot_storage_uses_single_storage_base() -> None:
     storage_init = (ROOT / "app" / "storage" / "__init__.py").read_text(encoding="utf-8")
-    assert "class SnapshotStorage(StorageBase):" in storage_init
-    assert "class SnapshotStorage(\n" not in storage_init
-    assert "_STORAGE_METHOD_GROUPS" in storage_init
-    assert "Mixin" not in storage_init
+    assert "_STORAGE_METHOD_GROUPS" not in storage_init
+    assert "setattr(SnapshotStorage" not in storage_init
+
+    from app.storage import SnapshotStorage
+    from app.storage.base import StorageBase
+
+    assert SnapshotStorage.__mro__.count(StorageBase) == 1
+    assert SnapshotStorage.__bases__[-1] is StorageBase
+    assert hasattr(SnapshotStorage, "save_snapshot")
+    assert hasattr(SnapshotStorage, "save_event")
+    assert hasattr(SnapshotStorage, "create_api_token")
+
+
+def test_shared_modals_use_native_dialog_contract() -> None:
+    index = (TEMPLATES / "index.html").read_text(encoding="utf-8")
+    backup_settings = (
+        MODULES / "backup" / "templates" / "backup_settings.html"
+    ).read_text(encoding="utf-8")
+    modal_script = (STATIC / "js" / "modals.js").read_text(encoding="utf-8")
+
+    for modal_id in (
+        "bqm-import-modal",
+        "entry-modal",
+        "incident-container-modal",
+        "import-modal",
+        "speedtest-setup-modal",
+        "bqm-setup-modal",
+        "smokeping-setup-modal",
+        "report-modal",
+        "chart-zoom-overlay",
+        "export-modal",
+    ):
+        assert re.search(rf"<dialog\b[^>]*\bid=\"{modal_id}\"", index)
+    assert re.search(r'<dialog\b[^>]*\bid="browse-modal"', backup_settings)
+
+    assert ".showModal()" in modal_script
+    assert ".close()" in modal_script
+    for removed_helper in (
+        "activeStack",
+        "FOCUSABLE",
+        "handleTab",
+        "focusin",
+        "MutationObserver",
+        "ensureModalSemantics",
+    ):
+        assert removed_helper not in modal_script
+
+
+def test_modal_consumers_have_no_absent_api_fallbacks() -> None:
+    consumers = [
+        STATIC / "js" / "bqm.js",
+        STATIC / "js" / "journal.js",
+        STATIC / "js" / "utils.js",
+        STATIC / "js" / "demo-banner.js",
+        MODULES / "smokeping" / "static" / "main.js",
+    ]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in consumers)
+
+    assert "if (window.DOCSightModal)" not in combined
+    assert "typeof window.docsightConfirm" not in combined
+    assert "window.confirm(" not in combined
+
+
+def test_frontend_simplifications_keep_single_owners() -> None:
+    settings = (STATIC / "js" / "settings.js").read_text(encoding="utf-8")
+    connection_charts = (
+        MODULES
+        / "connection_monitor"
+        / "static"
+        / "js"
+        / "connection-monitor-charts.js"
+    ).read_text(encoding="utf-8")
+    index = (TEMPLATES / "index.html").read_text(encoding="utf-8")
+
+    assert "function _runModuleAction(" in settings
+    assert "_runModuleAction(e, id, 'install', downloadUrl);" in settings
+    assert "_runModuleAction(e, id, 'uninstall');" in settings
+    assert "function bandPlugin(" not in connection_charts
+    assert "bandPlugin(datasets.length - 1, datasets.length, bandColor)" in connection_charts
+    assert "Escape key closes topmost open modal" not in index
 
 
 def test_smart_capture_speedtest_adapter_tests_are_consolidated() -> None:
@@ -328,8 +544,6 @@ def test_module_driver_registration_path_is_not_supported() -> None:
     module_loader = (ROOT / "app" / "module_loader.py").read_text(encoding="utf-8")
     driver_registry = (ROOT / "app" / "drivers" / "registry.py").read_text(encoding="utf-8")
     main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
-    module_card = (ROOT / "app" / "templates" / "settings" / "_module_card.html").read_text(encoding="utf-8")
-
     for removed in [
         "load_module_driver",
         "driver_class",
@@ -343,7 +557,6 @@ def test_module_driver_registration_path_is_not_supported() -> None:
         assert removed not in main
 
     assert '"driver"' not in module_loader
-    assert "mod.type == 'driver'" not in module_card
     assert not (MODULES / "thresholds_vfkd" / "manifest.json").exists()
     assert "BUILTIN_THRESHOLD_PROFILES" in (ROOT / "app" / "threshold_profiles.py").read_text(encoding="utf-8")
 

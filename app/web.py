@@ -1,6 +1,7 @@
 """Flask web UI for DOCSight – DOCSIS channel monitoring."""
 
 import functools
+import json
 import logging
 import math
 import os
@@ -15,7 +16,7 @@ from urllib.parse import urlencode
 import requests as _requests
 
 from cryptography.hazmat.primitives import hashes, hmac
-from flask import Flask, render_template, request, jsonify, redirect, session, send_from_directory
+from flask import Flask, render_template, request, jsonify, redirect, session, send_from_directory, url_for
 from jinja2 import FileSystemLoader, ChoiceLoader
 from markupsafe import Markup
 from werkzeug.security import check_password_hash
@@ -23,6 +24,7 @@ from zoneinfo import available_timezones
 
 from .config import DEFAULTS, MODULE_SECRET_KEYS, PASSWORD_MASK, POLL_MIN, POLL_MAX
 from .analyzer import get_thresholds
+from .base_path import normalize_base_path
 from .docsis_utils import qam_rank
 from .desktop_runtime import desktop_runtime_payload
 from .desktop_runtime_contract import DESKTOP_MODE_ENV
@@ -34,6 +36,7 @@ from .glossary import (
 )
 from .i18n import get_translations, LANGUAGES, LANG_FLAGS
 from .maintainer_notices import coerce_dismissed_notice_ids, get_active_notices
+from .module_loader import module_static_url
 from .tz import guess_iana_timezone as _guess_iana_timezone, get_tz_name as _get_public_tz_name, to_local as _to_local
 from .version import get_app_version
 
@@ -840,7 +843,7 @@ def require_auth(f):
         if _auth_required():
             if request.path.startswith("/api/"):
                 return jsonify({"error": "Authentication required"}), 401
-            return redirect("/login")
+            return redirect(url_for("login"))
         return f(*args, **kwargs)
     return decorated
 
@@ -858,7 +861,7 @@ def _require_session_auth(f):
                 return jsonify({"error": "Session authentication required"}), 403
             if request.path.startswith("/api/"):
                 return jsonify({"error": "Authentication required"}), 401
-            return redirect("/login")
+            return redirect(url_for("login"))
         return f(*args, **kwargs)
     return decorated
 
@@ -867,7 +870,7 @@ def _require_session_auth(f):
 def login():
     _sync_auth_state()
     if not _config_manager or not _config_manager.get("admin_password", ""):
-        return redirect("/")
+        return redirect(url_for("index"))
     lang = _get_lang()
     t = get_translations(lang)
     theme = _config_manager.get_theme() if _config_manager else "dark"
@@ -906,7 +909,7 @@ def login():
             session[_AUTH_MARKER_SESSION_KEY] = _admin_session_marker(stored)
             session.pop(_LOGIN_CSRF_SESSION_KEY, None)
             audit_log.info("Login successful: ip=%s", ip)
-            return redirect("/")
+            return redirect(url_for("index"))
         _record_failed_login(ip)
         audit_log.warning("Login failed: ip=%s", ip)
         error = t.get("login_failed", "Invalid password")
@@ -916,7 +919,17 @@ def login():
 @app.route("/logout", methods=["POST"])
 def logout():
     session.clear()
-    return redirect("/login")
+    return redirect(url_for("login"))
+
+
+@app.context_processor
+def inject_browser_url_bootstrap():
+    """Expose only the canonical mount path needed by browser URL sinks."""
+    return {
+        "browser_url_bootstrap": {
+            "basePath": normalize_base_path(request.environ.get("SCRIPT_NAME", "")),
+        },
+    }
 
 
 @app.context_processor
@@ -959,6 +972,7 @@ def inject_auth():
     desktop_mode = is_desktop_preview_mode()
     return {
         "auth_enabled": auth_enabled,
+        "module_static_url": module_static_url,
         "version": APP_VERSION,
         "update_available": _check_for_update(),
         "modules": modules,
@@ -1528,6 +1542,16 @@ def service_worker():
     return send_from_directory(app.static_folder, "sw.js", mimetype="application/javascript")
 
 
+@app.route("/static/manifest.json")
+def web_app_manifest():
+    with open(os.path.join(app.static_folder, "manifest.json"), encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    manifest["id"] = url_for("index")
+    response = jsonify(manifest)
+    response.mimetype = "application/manifest+json"
+    return response
+
+
 def _build_glossary_context(lang, t, selected_term_id=None):
     """Build static glossary view data for the app shell."""
     terms = sorted(get_glossary_terms(lang), key=lambda term: term["title"].casefold())
@@ -1557,7 +1581,9 @@ def glossary_page():
     if term_id in terms:
         hash_params["term"] = term_id
     hash_query = f"?{urlencode(hash_params)}" if hash_params else ""
-    return redirect(f"/?{urlencode({'lang': lang})}#glossary{hash_query}")
+    return redirect(
+        url_for("index", lang=lang, _anchor=f"glossary{hash_query}")
+    )
 
 
 @app.route("/")
@@ -1565,7 +1591,7 @@ def glossary_page():
 def index():
     demo_mode = _config_manager.is_demo_mode() if _config_manager else False
     if _config_manager and not demo_mode and not _config_manager.is_configured():
-        return redirect("/setup")
+        return redirect(url_for("setup"))
 
     theme = _config_manager.get_theme() if _config_manager else "dark"
     lang = _get_lang()
@@ -1695,7 +1721,7 @@ def desktop_runtime():
 @app.route("/setup")
 def setup():
     if _config_manager and (_config_manager.is_configured() or _config_manager.is_demo_mode()):
-        return redirect("/")
+        return redirect(url_for("index"))
     config = _config_manager.get_all(mask_secrets=True) if _config_manager else {}
     lang = _get_setup_lang()
     t = get_translations(lang)

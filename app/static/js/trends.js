@@ -139,8 +139,8 @@ function loadTrends(range) {
     _lastTrendRange = range;
 
     var wr = _getWeatherRange(range);
-    var trendsUrl = '/api/trends?range=' + encodeURIComponent(range || '1d');
-    var weatherUrl = '/api/weather/range?start=' + encodeURIComponent(wr.start) + '&end=' + encodeURIComponent(wr.end);
+    var trendsUrl = docsightUrl('/api/trends?range=' + encodeURIComponent(range || '1d'));
+    var weatherUrl = docsightUrl('/api/weather/range?start=' + encodeURIComponent(wr.start) + '&end=' + encodeURIComponent(wr.end));
 
     Promise.all([
         fetch(trendsUrl).then(function(r) { return r.json(); }),
@@ -196,12 +196,4 @@ document.querySelectorAll('.chart-expand-btn').forEach(function(btn) {
     btn.addEventListener('click', function() {
         openChartZoom(btn.getAttribute('data-chart'));
     });
-});
-
-/* Close chart zoom on Escape */
-document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape' && document.getElementById('chart-zoom-overlay').classList.contains('open')) {
-        closeChartZoom();
-        return;
-    }
 });

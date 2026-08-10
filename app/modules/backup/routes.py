@@ -8,7 +8,7 @@ import time
 from collections import defaultdict
 from datetime import datetime
 
-from flask import Blueprint, request, jsonify, redirect, send_file
+from flask import Blueprint, request, jsonify, redirect, send_file, url_for
 
 from app.web import (
     require_auth, _auth_required,
@@ -32,33 +32,6 @@ bp = Blueprint("backup_bp", __name__)
 _restore_attempts: dict[str, list[float]] = defaultdict(list)
 _RESTORE_MAX_ATTEMPTS = 5
 _RESTORE_WINDOW = 3600  # 1 hour
-
-
-class _CleanupOnClose:
-    """Proxy a WSGI iterable and run cleanup when the iterable is closed."""
-
-    def __init__(self, iterable, cleanup):
-        self._iterator = iter(iterable)
-        self._iterable = iterable
-        self._cleanup = cleanup
-        self._closed = False
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        return next(self._iterator)
-
-    def close(self):
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            close = getattr(self._iterable, "close", None)
-            if close is not None:
-                close()
-        finally:
-            self._cleanup()
 
 
 def _check_restore_rate_limit() -> bool:
@@ -113,10 +86,13 @@ def api_backup_download():
             download_name=filename,
         )
         cleanup_dir = temp_dir
-        response.response = _CleanupOnClose(
-            response.response,
-            lambda: shutil.rmtree(cleanup_dir, ignore_errors=True),
+        response.call_on_close(
+            lambda: shutil.rmtree(cleanup_dir, ignore_errors=True)
         )
+        # send_file uses direct passthrough by default, which returns its file
+        # wrapper directly and bypasses Response.close(). Keep iteration lazy
+        # while ensuring the WSGI closing iterator runs the registered cleanup.
+        response.direct_passthrough = False
         temp_dir = None
         audit_log.info("Backup downloaded: ip=%s", _get_client_ip())
         return response
@@ -191,7 +167,7 @@ def api_restore_validate():
     """
     _config_manager = get_config_manager()
     if _config_manager and _config_manager.is_configured() and _auth_required():
-        return redirect("/login")
+        return redirect(url_for("login"))
     if not (_config_manager and _config_manager.is_configured()):
         if _check_restore_rate_limit():
             audit_log.warning("Restore rate limit exceeded: ip=%s", _get_client_ip())
@@ -223,7 +199,7 @@ def api_restore():
     if _config_manager is None:
         return jsonify({"error": "Not initialized"}), 500
     if _config_manager.is_configured() and _auth_required():
-        return redirect("/login")
+        return redirect(url_for("login"))
     if not _config_manager.is_configured():
         if _check_restore_rate_limit():
             audit_log.warning("Restore rate limit exceeded: ip=%s", _get_client_ip())

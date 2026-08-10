@@ -17,10 +17,10 @@ function loadSmokepingGraphs() {
     var content = document.getElementById('smokeping-content');
     var noData = document.getElementById('smokeping-no-data');
     if (!content || !noData) return;
-    content.innerHTML = '';
+    content.replaceChildren();
     noData.style.display = 'none';
 
-    fetch('/api/smokeping/targets')
+    fetch(docsightUrl('/api/smokeping/targets'))
         .then(function(r) { return r.json(); })
         .then(function(targets) {
             if (!targets || targets.length === 0) {
@@ -33,7 +33,13 @@ function loadSmokepingGraphs() {
                 card.className = 'bqm-card';
                 var header = document.createElement('div');
                 header.className = 'chart-card-header';
-                header.innerHTML = '<div class="chart-header-content"><div class="chart-label">' + target + '</div></div>';
+                var headerContent = document.createElement('div');
+                headerContent.className = 'chart-header-content';
+                var headerLabel = document.createElement('div');
+                headerLabel.className = 'chart-label';
+                headerLabel.textContent = target;
+                headerContent.appendChild(headerLabel);
+                header.appendChild(headerContent);
                 card.appendChild(header);
                 var wrap = document.createElement('div');
                 wrap.style.textAlign = 'center';
@@ -41,9 +47,13 @@ function loadSmokepingGraphs() {
                 img.style.maxWidth = '100%';
                 img.style.borderRadius = '8px';
                 img.alt = target;
-                img.src = '/api/smokeping/graph/' + encodeURIComponent(target) + '/' + _smokepingSpan;
+                img.src = docsightUrl('/api/smokeping/graph/' + encodeURIComponent(target) + '/' + _smokepingSpan);
                 img.onerror = function() {
-                    wrap.innerHTML = '<div class="no-data-msg" style="display:block;">' + (T.smokeping_no_data || T['docsight.smokeping.smokeping_no_data'] || 'Could not load graph.') + '</div>';
+                    var fallback = document.createElement('div');
+                    fallback.className = 'no-data-msg';
+                    fallback.style.display = 'block';
+                    fallback.textContent = T.smokeping_no_data || T['docsight.smokeping.smokeping_no_data'] || 'Could not load graph.';
+                    wrap.replaceChildren(fallback);
                 };
                 wrap.appendChild(img);
                 card.appendChild(wrap);
@@ -60,18 +70,10 @@ window.loadSmokepingGraphs = loadSmokepingGraphs;
 
 /* ── Smokeping Setup Modal ── */
 function openSmokepingSetupModal() {
-    if (window.DOCSightModal) {
-        window.DOCSightModal.open('smokeping-setup-modal');
-    } else {
-        document.getElementById('smokeping-setup-modal').classList.add('open');
-    }
+    window.DOCSightModal.open('smokeping-setup-modal');
 }
 function closeSmokepingSetupModal() {
-    if (window.DOCSightModal) {
-        window.DOCSightModal.close('smokeping-setup-modal');
-    } else {
-        document.getElementById('smokeping-setup-modal').classList.remove('open');
-    }
+    window.DOCSightModal.close('smokeping-setup-modal');
 }
 window.openSmokepingSetupModal = openSmokepingSetupModal;
 window.closeSmokepingSetupModal = closeSmokepingSetupModal;

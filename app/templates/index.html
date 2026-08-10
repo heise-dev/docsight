@@ -8,19 +8,19 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="mobile-web-app-capable" content="yes">
     <title>DOCSight</title>
-    <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
-    <link rel="apple-touch-icon" href="/static/icon.png">
-    <link rel="manifest" href="/static/manifest.json">
-    <link rel="stylesheet" href="/static/css/fonts.css?v={{ version|urlencode }}">
-    <link rel="stylesheet" href="/static/css/tokens.css?v={{ version|urlencode }}">
-    <link rel="stylesheet" href="/static/css/components.css?v={{ version|urlencode }}">
-    <link rel="stylesheet" href="/static/css/main.css?v={{ version|urlencode }}">
-    <link rel="stylesheet" href="/static/css/views.css?v={{ version|urlencode }}">
-    <link rel="stylesheet" href="/static/css/modals.css?v={{ version|urlencode }}">
-    <link rel="stylesheet" href="/static/css/glossary.css?v={{ version|urlencode }}">
-    <link rel="stylesheet" href="/static/css/segment-utilization.css?v={{ version|urlencode }}">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo.svg') }}">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='icon.png') }}">
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/fonts.css', v=version) }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css', v=version) }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/components.css', v=version) }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css', v=version) }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/views.css', v=version) }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/modals.css', v=version) }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/glossary.css', v=version) }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/segment-utilization.css', v=version) }}">
     {% for mod in modules|sort(attribute='menu.order') if mod.has_css %}
-    <link rel="stylesheet" href="/modules/{{ mod.id }}/static/style.css?v={{ version|urlencode }}">
+    <link rel="stylesheet" href="{{ module_static_url(mod.id, 'style.css', v=version) }}">
     {% endfor %}
     {% if active_theme_data %}
     <style id="theme-module-vars">
@@ -39,7 +39,8 @@
     {% if config.font_family == 'system' %}
     <style id="font-override">:root { --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }</style>
     {% endif %}
-    <script src="/static/vendor/lucide.min.js?v={{ version|urlencode }}"></script>
+    {% include 'partials/browser_url_bootstrap.html' %}
+    <script src="{{ url_for('static', filename='vendor/lucide.min.js', v=version) }}"></script>
 </head>
 <body>
 {% set connection_monitor_installed = modules|selectattr('id', 'equalto', 'docsight.connection_monitor')|list %}
@@ -70,7 +71,7 @@
 <!-- Sidebar -->
 <nav class="sidebar" id="sidebar" aria-label="Main navigation" aria-hidden="true">
     <div class="sidebar-header">
-        <div class="sidebar-logo"><img src="/static/logo.svg" alt="DOCSight" width="18" height="18"></div>
+        <div class="sidebar-logo"><img src="{{ url_for('static', filename='logo.svg') }}" alt="DOCSight" width="18" height="18"></div>
         <div class="sidebar-brand-text">
             <div class="sidebar-title">DOCSight</div>
             <div class="sidebar-subtitle">{{ t.sidebar_monitoring }}</div>
@@ -241,14 +242,14 @@
         </div>
         {% endif %}
         <div style="flex:1;"></div>
-        <a class="nav-item" href="/settings">
+        <a class="nav-item" href="{{ url_for('settings') }}">
             <i data-lucide="settings"></i> {{ t.settings }}
         </a>
-        <a class="nav-item" href="/settings#support">
+        <a class="nav-item" href="{{ url_for('settings', _anchor='support') }}">
             <i data-lucide="heart-handshake"></i> {{ t.get('support_nav', 'Support') }}
         </a>
         {% if auth_enabled %}
-        <form action="/logout" method="post">
+        <form action="{{ url_for('logout') }}" method="post">
             <button type="submit" class="nav-item">
                 <i data-lucide="log-out"></i> {{ t.logout }}
             </button>
@@ -1156,7 +1157,7 @@
         {% endif %}
     </div>
     {% if modules|selectattr('id', 'equalto', 'docsight.connection_monitor')|list %}
-    <script src="/modules/docsight.connection_monitor/static/js/connection-monitor-card.js?v={{ version|urlencode }}"></script>
+    <script src="{{ module_static_url('docsight.connection_monitor', 'js/connection-monitor-card.js', v=version) }}"></script>
     {% endif %}
 
     {# ══════════════════════════════════════════════════════════════════════════
@@ -1536,11 +1537,11 @@
 {% endif %}
 
 <!-- ═══ BQM Import Modal ═══ -->
-<div class="modal-overlay" id="bqm-import-modal" role="dialog" aria-modal="true" aria-labelledby="bqm-import-modal-title" onclick="if(event.target===this)closeBqmImportModal()">
+<dialog class="modal-overlay" id="bqm-import-modal" role="dialog" aria-modal="true" aria-labelledby="bqm-import-modal-title" onclick="if(event.target===this)closeBqmImportModal()" oncancel="event.preventDefault(); closeBqmImportModal()">
     <div class="modal" style="max-width:800px;">
         <div class="modal-header">
             <h2 id="bqm-import-modal-title">{{ t.bqm_import_title }}</h2>
-            <button class="modal-close" onclick="closeBqmImportModal()">&times;</button>
+            <button class="modal-close" onclick="closeBqmImportModal()" aria-label="{{ t.close }}">&times;</button>
         </div>
         <div class="modal-body" style="overflow-y:auto;">
             <!-- Drop zone -->
@@ -1594,7 +1595,7 @@
             </div>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- BQM CSV Import (inline, below calendar) -->
 <div id="bqm-csv-import-section" class="bqm-csv-import" style="display:none; margin:16px auto; max-width:480px; text-align:center;">
@@ -1887,7 +1888,7 @@
                 <span>{{ t.event_log }}</span>
             </div>
             <div class="events-card-actions">
-                <a class="btn-export-events" id="events-export-csv" href="/api/events/export.csv?exclude_operational=true" download>{{ t.event_export_csv }}</a>
+                <a class="btn-export-events" id="events-export-csv" href="{{ url_for('events_bp.api_events_export_csv', exclude_operational='true') }}" download>{{ t.event_export_csv }}</a>
                 <button class="btn-ack-all" id="btn-ack-all" onclick="acknowledgeAllEvents()" style="display:none;">&#10003; {{ t.event_acknowledge_all }}</button>
             </div>
         </div>
@@ -2081,14 +2082,14 @@
 </div>
 
 <!-- ═══ Entry Modal ═══ -->
-<div class="modal-overlay" id="entry-modal" role="dialog" aria-modal="true" aria-labelledby="entry-modal-title" onclick="if(event.target===this)closeEntryModal()">
+<dialog class="modal-overlay" id="entry-modal" role="dialog" aria-modal="true" aria-labelledby="entry-modal-title" onclick="if(event.target===this)closeEntryModal()">
     <div class="modal" style="max-width:640px;">
         <div class="modal-header">
             <div style="display:flex;align-items:center;gap:10px;">
                 <span id="entry-modal-icon" class="incident-modal-icon"></span>
                 <h2 id="entry-modal-title"></h2>
             </div>
-            <button class="modal-close" onclick="closeEntryModal()">&times;</button>
+            <button class="modal-close" onclick="closeEntryModal()" aria-label="{{ t.close }}">&times;</button>
         </div>
         <div class="modal-body" style="overflow-y:auto;">
             <p class="incident-modal-intro">{{ t.get('entry_modal_intro', 'Capture what happened and link the evidence DOCSight can turn into an ISP-ready timeline.') }}</p>
@@ -2142,14 +2143,14 @@
             </div>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- ═══ Incident Container Modal ═══ -->
-<div class="modal-overlay" id="incident-container-modal" role="dialog" aria-modal="true" aria-labelledby="incident-container-modal-title" onclick="if(event.target===this)closeIncidentModal()">
+<dialog class="modal-overlay" id="incident-container-modal" role="dialog" aria-modal="true" aria-labelledby="incident-container-modal-title" onclick="if(event.target===this)closeIncidentModal()">
     <div class="modal incident-container-modal" style="max-width:560px;">
         <div class="modal-header">
             <h2 id="incident-container-modal-title"></h2>
-            <button class="modal-close" onclick="closeIncidentModal()">&times;</button>
+            <button class="modal-close" onclick="closeIncidentModal()" aria-label="{{ t.close }}">&times;</button>
         </div>
         <div class="modal-body" style="overflow-y:auto;">
             <p class="incident-modal-intro">{{ t.get('incident_modal_intro', 'Group related entries and evidence so DOCSight can build one clear incident timeline and report path.') }}</p>
@@ -2209,14 +2210,14 @@
             </div>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- ═══ Import Modal ═══ -->
-<div class="modal-overlay" id="import-modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title" onclick="if(event.target===this)closeImportModal()">
+<dialog class="modal-overlay" id="import-modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title" onclick="if(event.target===this)closeImportModal()">
     <div class="modal" style="max-width:900px;">
         <div class="modal-header">
             <h2 id="import-modal-title">{{ t.import_incidents }}</h2>
-            <button class="modal-close" onclick="closeImportModal()">&times;</button>
+            <button class="modal-close" onclick="closeImportModal()" aria-label="{{ t.close }}">&times;</button>
         </div>
         <div class="modal-body" style="overflow-y:auto;">
             <!-- Upload zone -->
@@ -2268,7 +2269,7 @@
             </div>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- ═══ View: Speedtest ═══ -->
 {% if speedtest_configured %}
@@ -2516,7 +2517,7 @@
 </div><!-- /app-layout -->
 
 <!-- Speedtest Setup Modal -->
-<div class="modal-overlay" id="speedtest-setup-modal" role="dialog" aria-modal="true" aria-labelledby="speedtest-setup-modal-title">
+<dialog class="modal-overlay" id="speedtest-setup-modal" role="dialog" aria-modal="true" aria-labelledby="speedtest-setup-modal-title">
     <div class="modal modal-wide setup-guide-modal">
         <div class="modal-header">
             <h2 id="speedtest-setup-modal-title">⚡ {{ t.get('speedtest_setup_guided_title', 'Speedtest Tracker setup') }}</h2>
@@ -2554,13 +2555,13 @@
         <div id="speedtest-setup-status" class="setup-validation-status" role="status" aria-live="polite"></div>
         <div class="modal-footer">
             <button class="btn btn-muted" onclick="closeSpeedtestSetupModal()">{{ t.close }}</button>
-            <a class="btn btn-accent" href="/settings#mod-docsight_speedtest">⚙ {{ t.get('speedtest_setup_open_settings', 'Open Speedtest settings') }}</a>
+            <a class="btn btn-accent" href="{{ url_for('settings', _anchor='mod-docsight_speedtest') }}">⚙ {{ t.get('speedtest_setup_open_settings', 'Open Speedtest settings') }}</a>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- BQM Setup Modal -->
-<div class="modal-overlay" id="bqm-setup-modal" role="dialog" aria-modal="true" aria-labelledby="bqm-setup-modal-title">
+<dialog class="modal-overlay" id="bqm-setup-modal" role="dialog" aria-modal="true" aria-labelledby="bqm-setup-modal-title">
     <div class="modal modal-wide setup-guide-modal">
         <div class="modal-header">
             <h2 id="bqm-setup-modal-title">📈 {{ t.get('bqm_setup_guided_title', 'ThinkBroadband BQM setup') }}</h2>
@@ -2574,13 +2575,13 @@
             <section class="setup-guide-card"><h3>{{ t.get('setup_validate_title', 'Validate') }}</h3><p>{{ t.get('bqm_setup_validate_text', 'After saving a CSV Yesterday URL, DOCSight performs one initial fetch. Use CSV bulk import for up to 12 months of history or longer gaps.') }}</p><button class="btn btn-muted" onclick="validateSetupGuidance('bqm-setup-status', 'bqm')">{{ t.get('setup_validate_source', 'Review validation path') }}</button></section>
         </div>
         <div id="bqm-setup-status" class="setup-validation-status" role="status" aria-live="polite"></div>
-        <div class="modal-footer"><button class="btn btn-muted" onclick="closeBqmSetupModal()">{{ t.close }}</button><a class="btn btn-accent" href="/settings#mod-docsight_bqm">⚙ {{ t.get('bqm_setup_open_settings', 'Open BQM settings') }}</a></div>
+        <div class="modal-footer"><button class="btn btn-muted" onclick="closeBqmSetupModal()">{{ t.close }}</button><a class="btn btn-accent" href="{{ url_for('settings', _anchor='mod-docsight_bqm') }}">⚙ {{ t.get('bqm_setup_open_settings', 'Open BQM settings') }}</a></div>
     </div>
-</div>
+</dialog>
 
 <!-- Smokeping Setup Modal -->
 {% if modules|selectattr('id', 'equalto', 'docsight.smokeping')|list %}
-<div class="modal-overlay" id="smokeping-setup-modal" role="dialog" aria-modal="true" aria-labelledby="smokeping-setup-modal-title">
+<dialog class="modal-overlay" id="smokeping-setup-modal" role="dialog" aria-modal="true" aria-labelledby="smokeping-setup-modal-title">
     <div class="modal modal-wide setup-guide-modal">
         <div class="modal-header">
             <h2 id="smokeping-setup-modal-title">📡 {{ t.get('smokeping_setup_guided_title', 'SmokePing setup') }}</h2>
@@ -2594,17 +2595,17 @@
             <section class="setup-guide-card"><h3>{{ t.get('setup_validate_title', 'Validate') }}</h3><p>{{ t.get('smokeping_setup_validate_text', 'After saving the endpoint, validate that DOCSight can discover target graphs.') }}</p><button class="btn btn-muted" onclick="validateSetupGuidance('smokeping-setup-status', 'smokeping')">{{ t.get('setup_validate_source', 'Review validation path') }}</button></section>
         </div>
         <div id="smokeping-setup-status" class="setup-validation-status" role="status" aria-live="polite"></div>
-        <div class="modal-footer"><button class="btn btn-muted" onclick="closeSmokepingSetupModal()">{{ t.close }}</button><a class="btn btn-accent" href="/settings#mod-docsight_smokeping">⚙ {{ t.get('smokeping_setup_open_settings', 'Open SmokePing settings') }}</a></div>
+        <div class="modal-footer"><button class="btn btn-muted" onclick="closeSmokepingSetupModal()">{{ t.close }}</button><a class="btn btn-accent" href="{{ url_for('settings', _anchor='mod-docsight_smokeping') }}">⚙ {{ t.get('smokeping_setup_open_settings', 'Open SmokePing settings') }}</a></div>
     </div>
-</div>
+</dialog>
 {% endif %}
 
 <!-- Report Modal -->
-<div class="modal-overlay" id="report-modal" role="dialog" aria-modal="true" aria-labelledby="report-modal-title" onclick="if(event.target===this)closeReportModal()">
+<dialog class="modal-overlay" id="report-modal" role="dialog" aria-modal="true" aria-labelledby="report-modal-title" onclick="if(event.target===this)closeReportModal()" oncancel="event.preventDefault(); closeReportModal()">
     <div class="modal" style="max-width:800px;">
         <div class="modal-header">
             <h2 id="report-modal-title">{{ t.get('report_builder_title', 'ISP-ready evidence package') }}</h2>
-            <button class="modal-close" onclick="closeReportModal()">&times;</button>
+            <button class="modal-close" onclick="closeReportModal()" aria-label="{{ t.close }}">&times;</button>
         </div>
         <p class="modal-hint">{{ t.get('report_builder_intro', 'Build a local evidence package for ISP support or complaint escalation.') }}</p>
         <div id="report-builder-status" class="report-builder-status" role="status" aria-live="polite"></div>
@@ -2684,21 +2685,21 @@
             <button class="btn btn-accent" id="report-pdf-btn" style="display:none;" onclick="downloadReport()">&#128196; {{ t.get('report_download_package', 'Download PDF package') }}</button>
         </div>
     </div>
-</div>
+</dialog>
 
 <!-- Chart Zoom Modal -->
-<div class="chart-zoom-overlay" id="chart-zoom-overlay" role="dialog" aria-modal="true" aria-labelledby="chart-zoom-title" onclick="if(event.target===this)closeChartZoom()">
+<dialog class="chart-zoom-overlay" id="chart-zoom-overlay" role="dialog" aria-modal="true" aria-labelledby="chart-zoom-title" onclick="if(event.target===this)closeChartZoom()" oncancel="event.preventDefault(); closeChartZoom()">
     <div class="chart-zoom-modal">
         <div class="modal-header">
             <h2 id="chart-zoom-title"></h2>
-            <button class="modal-close" onclick="closeChartZoom()">&times;</button>
+            <button class="modal-close" onclick="closeChartZoom()" aria-label="{{ t.close }}">&times;</button>
         </div>
         <div id="chart-zoom-canvas" style="flex:1;min-height:0;width:100%;"></div>
     </div>
-</div>
+</dialog>
 
 <!-- Export Modal -->
-<div class="modal-overlay" id="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-modal-title">
+<dialog class="modal-overlay" id="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-modal-title">
     <div class="modal modal-wide">
         <div class="modal-header">
             <h2 id="export-modal-title">{{ t.export_title }}</h2>
@@ -2758,11 +2759,11 @@
             <button class="btn btn-accent" id="export-copy-btn" onclick="copyExport()">{{ t.get('export_copy', 'Copy export') }}</button>
         </div>
     </div>
-</div>
+</dialog>
 
 <div class="toast" id="toast"></div>
-<link rel="stylesheet" href="/static/vendor/uPlot.min.css?v={{ version|urlencode }}">
-<script src="/static/vendor/uPlot.min.js?v={{ version|urlencode }}"></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/uPlot.min.css', v=version) }}">
+<script src="{{ url_for('static', filename='vendor/uPlot.min.js', v=version) }}"></script>
 <script src="{{ url_for('static', filename='js/hero-chart.js') }}?v={{ version|urlencode }}"></script>
 <script src="{{ url_for('static', filename='js/sparklines.js') }}?v={{ version|urlencode }}"></script>
 
@@ -2846,7 +2847,7 @@
 })();
 </script>
 
-<script src="/static/js/chart-engine.js?v={{ version|urlencode }}"></script>
+<script src="{{ url_for('static', filename='js/chart-engine.js', v=version) }}"></script>
 <script>
 var T = {{ t|tojson }};
 var currentLang = {{ lang|tojson }};
@@ -3364,7 +3365,7 @@ var CORRELATION_CM_AVAILABLE = {{ (connection_monitor_installed|length > 0)|tojs
             if (refreshBtn.disabled) return;
             refreshBtn.disabled = true;
             refreshBtn.classList.add('spinning');
-            fetch('/api/poll', {method: 'POST'})
+            fetch(docsightUrl('/api/poll'), {method: 'POST'})
                 .then(function(r) { return r.json().then(function(d) { return {status: r.status, data: d}; }); })
                 .then(function(res) {
                     if (res.data.success) {
@@ -3427,25 +3428,27 @@ var CORRELATION_CM_AVAILABLE = {{ (connection_monitor_installed|length > 0)|tojs
 })();
 
 </script>
-<script src="/static/js/modals.js?v={{ version|urlencode }}"></script>
-<script src="/static/js/journal.js?v={{ version|urlencode }}"></script>
-<script src="/modules/docsight.bqm/static/js/bqm-chart.js?v={{ version|urlencode }}"></script>
-<script src="/static/js/bqm.js?v={{ version|urlencode }}"></script>
-<script src="/static/js/trends.js?v={{ version|urlencode }}"></script>
-<script src="/static/js/channels.js?v={{ version|urlencode }}"></script>
-<script src="/static/js/integrations.js?v={{ version|urlencode }}"></script>
-<script src="/static/js/events.js?v={{ version|urlencode }}"></script>
-<script src="/static/js/utils.js?v={{ version|urlencode }}"></script>
-<script src="/static/js/notices.js?v={{ version|urlencode }}"></script>
-<script src="/static/js/demo-banner.js?v={{ version|urlencode }}"></script>
-<script src="/static/js/speedtest.js?v={{ version|urlencode }}"></script>
-<script src="/static/js/correlation.js?v={{ version|urlencode }}"></script>
-<script src="/static/js/segment-utilization.js?v={{ version|urlencode }}"></script>
-<script src="/static/js/glossary-page.js?v={{ version|urlencode }}"></script>
-<script src="/static/js/glossary.js?v={{ version|urlencode }}"></script>
+<script src="{{ url_for('static', filename='js/modals.js', v=version) }}"></script>
+<script src="{{ url_for('static', filename='js/journal.js', v=version) }}"></script>
+{% if modules|selectattr('id', 'equalto', 'docsight.bqm')|list %}
+<script src="{{ module_static_url('docsight.bqm', 'js/bqm-chart.js', v=version) }}"></script>
+{% endif %}
+<script src="{{ url_for('static', filename='js/bqm.js', v=version) }}"></script>
+<script src="{{ url_for('static', filename='js/trends.js', v=version) }}"></script>
+<script src="{{ url_for('static', filename='js/channels.js', v=version) }}"></script>
+<script src="{{ url_for('static', filename='js/integrations.js', v=version) }}"></script>
+<script src="{{ url_for('static', filename='js/events.js', v=version) }}"></script>
+<script src="{{ url_for('static', filename='js/utils.js', v=version) }}"></script>
+<script src="{{ url_for('static', filename='js/notices.js', v=version) }}"></script>
+<script src="{{ url_for('static', filename='js/demo-banner.js', v=version) }}"></script>
+<script src="{{ url_for('static', filename='js/speedtest.js', v=version) }}"></script>
+<script src="{{ url_for('static', filename='js/correlation.js', v=version) }}"></script>
+<script src="{{ url_for('static', filename='js/segment-utilization.js', v=version) }}"></script>
+<script src="{{ url_for('static', filename='js/glossary-page.js', v=version) }}"></script>
+<script src="{{ url_for('static', filename='js/glossary.js', v=version) }}"></script>
 
 {% for mod in modules if mod.has_js %}
-<script src="/modules/{{ mod.id }}/static/main.js?v={{ version|urlencode }}"></script>
+<script src="{{ module_static_url(mod.id, 'main.js', v=version) }}"></script>
 {% endfor %}
 
 <script>
@@ -3459,29 +3462,6 @@ var CORRELATION_CM_AVAILABLE = {{ (connection_monitor_installed|length > 0)|tojs
     lucide.createIcons();
   });
 
-  // Escape key closes topmost open modal
-  document.addEventListener('keydown', function(e) {
-    if (e.key !== 'Escape') return;
-    var closers = [
-      ['chart-zoom-overlay', closeChartZoom],
-      ['export-modal', typeof closeExportModal === 'function' ? closeExportModal : null],
-      ['report-modal', typeof closeReportModal === 'function' ? closeReportModal : null],
-      ['entry-modal', typeof closeEntryModal === 'function' ? closeEntryModal : null],
-      ['incident-container-modal', typeof closeIncidentModal === 'function' ? closeIncidentModal : null],
-      ['import-modal', typeof closeImportModal === 'function' ? closeImportModal : null],
-      ['bqm-import-modal', typeof closeBqmImportModal === 'function' ? closeBqmImportModal : null],
-      ['speedtest-setup-modal', typeof closeSpeedtestSetupModal === 'function' ? closeSpeedtestSetupModal : null],
-      ['bqm-setup-modal', typeof closeBqmSetupModal === 'function' ? closeBqmSetupModal : null],
-      ['smokeping-setup-modal', typeof closeSmokepingSetupModal === 'function' ? closeSmokepingSetupModal : null]
-    ];
-    for (var i = 0; i < closers.length; i++) {
-      var el = document.getElementById(closers[i][0]);
-      if (el && (el.classList.contains('open') || el.style.display === 'flex')) {
-        if (closers[i][1]) closers[i][1]();
-        break;
-      }
-    }
-  });
 </script>
 
 
@@ -3489,22 +3469,28 @@ var CORRELATION_CM_AVAILABLE = {{ (connection_monitor_installed|length > 0)|tojs
 if ('serviceWorker' in navigator) {
     var isLocalDevHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
     var enableServiceWorkerTestMode = new URLSearchParams(window.location.search).has('enable-sw-test');
+    var docsightServiceWorkerScope = new URL(docsightUrl('/'), window.location.origin).href;
+    var docsightCacheNamespace = 'docsight-' + encodeURIComponent(new URL(docsightServiceWorkerScope).pathname) + '-';
     if (isLocalDevHost && !enableServiceWorkerTestMode) {
         navigator.serviceWorker.getRegistrations()
             .then(function(registrations) {
-                return Promise.all(registrations.map(function(registration) {
+                return Promise.all(registrations.filter(function(registration) {
+                    return registration.scope === docsightServiceWorkerScope;
+                }).map(function(registration) {
                     return registration.unregister();
                 }));
             })
             .then(function() {
                 if (!window.caches) return;
                 return caches.keys().then(function(keys) {
-                    return Promise.all(keys.map(function(key) { return caches.delete(key); }));
+                    return Promise.all(keys.filter(function(key) {
+                        return key.indexOf(docsightCacheNamespace) === 0;
+                    }).map(function(key) { return caches.delete(key); }));
                 });
             })
             .catch(function(err) { console.warn('SW cleanup failed:', err); });
     } else {
-        navigator.serviceWorker.register('/sw.js', { scope: '/' })
+        navigator.serviceWorker.register(docsightUrl('/sw.js'), { scope: docsightUrl('/') })
             .catch(function(err) { console.warn('SW registration failed:', err); });
     }
 }
