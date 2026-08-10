@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from flask import Flask
+from werkzeug.exceptions import NotFound
 import app.module_loader as module_loader
 from app.module_loader import ModuleInfo, validate_manifest, ManifestError, discover_modules, register_module_config, merge_module_i18n, load_module_routes, load_module_collector, load_module_publisher, setup_module_static, setup_module_templates, ModuleLoader
 
@@ -390,6 +391,38 @@ class TestStaticAndTemplates:
                 assert resp.status_code == 200
                 assert b"console.log" in resp.data
                 resp.close()
+
+    def test_static_route_rejects_traversal_and_symlink_escape(self, tmp_path):
+        app = Flask(__name__)
+        module_dir = tmp_path / "testmod"
+        static_dir = module_dir / "static"
+        nested_dir = static_dir / "nested"
+        nested_dir.mkdir(parents=True)
+        (nested_dir / "ok.js").write_text("safe", encoding="utf-8")
+        outside_dir = module_dir / "static-outside"
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.js"
+        outside_file.write_text("secret", encoding="utf-8")
+        symlink = static_dir / "escape.js"
+        try:
+            symlink.symlink_to(outside_file)
+        except OSError:
+            pytest.skip("symlinks are unavailable in this environment")
+
+        setup_module_static(app, "test.mod", str(module_dir), "static/")
+        view = app.view_functions[module_loader.module_static_endpoint("test.mod")]
+
+        with app.test_request_context("/"):
+            with pytest.raises(NotFound):
+                view("../static-outside/secret.js")
+            with pytest.raises(NotFound):
+                view("escape.js")
+
+        with app.test_client() as client:
+            response = client.get("/modules/test.mod/static/nested/ok.js")
+            assert response.status_code == 200
+            assert response.data == b"safe"
+            response.close()
 
     def test_module_static_endpoint_and_url_helper_share_prefix_aware_contract(self):
         endpoint = module_loader.module_static_endpoint("test.mod")

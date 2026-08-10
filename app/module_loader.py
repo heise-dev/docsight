@@ -11,7 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from flask import send_from_directory, url_for
+from flask import abort, send_file, url_for
 
 from app import analyzer as _analyzer
 from app import config as _cfg
@@ -716,10 +716,20 @@ def setup_module_static(app, module_id: str, module_path: str, static_subdir: st
         log.debug("Module '%s': no static directory at %s", module_id, static_dir)
         return
 
+    static_root = os.path.realpath(static_dir)
+    static_prefix = static_root + os.sep
     route = f"/modules/{module_id}/static/<path:filename>"
 
-    def serve_static(filename, _dir=static_dir):
-        return send_from_directory(_dir, filename)
+    def serve_static(filename, _root=static_root, _prefix=static_prefix):
+        try:
+            candidate = os.path.realpath(os.path.join(_root, filename))
+        except (OSError, TypeError, ValueError):
+            return abort(404)
+        if candidate.startswith(_prefix):
+            if not os.path.isfile(candidate):
+                return abort(404)
+            return send_file(candidate)
+        return abort(404)
 
     # Use a unique endpoint name per module
     endpoint = module_static_endpoint(module_id)
