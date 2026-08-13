@@ -2,6 +2,7 @@
 
 from unittest.mock import Mock, patch
 from app.analyzer import analyze
+from app.threshold_profiles import BUILTIN_THRESHOLD_PROFILES
 from app.web import app
 
 
@@ -21,6 +22,14 @@ def _analyze_downstream_channel(*, docsis, power, quality, modulation, channel_t
         "downstream": [channel],
         "upstream": [],
     })
+
+
+def _add_builtin_analysis_meta(analysis):
+    profile = BUILTIN_THRESHOLD_PROFILES[0]
+    analysis["analysis_meta"] = {
+        "threshold_profile": {"id": profile["id"], "version": profile["version"]}
+    }
+    return analysis
 
 
 class TestReportHelpers:
@@ -92,6 +101,7 @@ class TestReportHelpers:
         from app.modules.reports.report import _build_diagnostic_notes
 
         analysis = {
+            "analysis_meta": _add_builtin_analysis_meta({})["analysis_meta"],
             "ds_channels": [
                 {
                     "channel_id": 1,
@@ -111,6 +121,7 @@ class TestReportHelpers:
                     "profile_modulation": "64QAM",
                     "power": 55.0,
                     "power_health": "critical",
+                    "health_detail": "power critical high",
                 }
             ],
         }
@@ -123,13 +134,13 @@ class TestReportHelpers:
     def test_ofdm_good_analyzer_metric_health_produces_no_diagnostic_note(self):
         from app.modules.reports.report import _build_diagnostic_notes
 
-        analysis = _analyze_downstream_channel(
+        analysis = _add_builtin_analysis_meta(_analyze_downstream_channel(
             docsis="3.1",
             power=-8.2,
             quality=33.0,
             modulation="4096QAM",
             channel_type="OFDM",
-        )
+        ))
         channel = analysis["ds_channels"][0]
         channel["power_health"] = "good"
         channel["snr_health"] = "good"
@@ -141,13 +152,13 @@ class TestReportHelpers:
     def test_ofdm_legacy_metric_health_fallback_uses_ofdm_thresholds(self):
         from app.modules.reports.report import _build_diagnostic_notes
 
-        analysis = _analyze_downstream_channel(
+        analysis = _add_builtin_analysis_meta(_analyze_downstream_channel(
             docsis="3.1",
             power=-8.2,
             quality=33.0,
             modulation="4096QAM",
             channel_type="OFDM",
-        )
+        ))
         assert "power_health" not in analysis["ds_channels"][0]
         assert "snr_health" not in analysis["ds_channels"][0]
 
@@ -156,13 +167,13 @@ class TestReportHelpers:
     def test_bad_ofdm_values_produce_notes_with_ofdm_limits(self):
         from app.modules.reports.report import _build_diagnostic_notes
 
-        analysis = _analyze_downstream_channel(
+        analysis = _add_builtin_analysis_meta(_analyze_downstream_channel(
             docsis="3.1",
             power=-15.1,
             quality=24.4,
             modulation="4096QAM",
             channel_type="OFDM",
-        )
+        ))
 
         notes = _build_diagnostic_notes(analysis)
 
@@ -173,13 +184,13 @@ class TestReportHelpers:
     def test_sc_qam_diagnostic_thresholds_remain_unchanged(self):
         from app.modules.reports.report import _build_diagnostic_notes
 
-        analysis = _analyze_downstream_channel(
+        analysis = _add_builtin_analysis_meta(_analyze_downstream_channel(
             docsis="3.0",
             power=-8.2,
             quality=-28.9,
             modulation="256QAM",
             channel_type="SC-QAM",
-        )
+        ))
 
         notes = _build_diagnostic_notes(analysis)
 

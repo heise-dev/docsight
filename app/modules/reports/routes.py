@@ -1,7 +1,7 @@
 """Report generation routes."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, request, jsonify, make_response
 
@@ -17,6 +17,94 @@ from .report import generate_complaint_text, generate_report
 log = logging.getLogger("docsis.web")
 
 bp = Blueprint("reports_bp", __name__)
+
+
+def _window_error(message, code, field=None):
+    payload = {"error": message, "code": code}
+    if field is not None:
+        payload["field"] = field
+    return jsonify(payload), 400
+
+
+def _parse_window_bound(value, field):
+    raw = value.strip()
+    if raw.endswith(("Z", "z")):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None, _window_error(
+            f"'{field}' must be a valid ISO-8601 timestamp",
+            "window_invalid_timestamp",
+            field,
+        )
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None, _window_error(
+            f"'{field}' must include a timezone",
+            "window_timezone_required",
+            field,
+        )
+    normalized = parsed.astimezone(timezone.utc).replace(microsecond=0)
+    return normalized, None
+
+
+def _get_report_window():
+    """Return inclusive canonical UTC bounds, or a stable JSON 400 response."""
+    from_value = request.args.get("from")
+    to_value = request.args.get("to")
+    has_from = from_value is not None
+    has_to = to_value is not None
+    has_days = "days" in request.args
+
+    if has_days and (has_from or has_to):
+        return None, _window_error(
+            "'days' cannot be combined with 'from' and 'to'",
+            "window_ambiguous_mode",
+        )
+    if has_from != has_to:
+        return None, _window_error(
+            "Both 'from' and 'to' are required",
+            "window_bounds_required",
+        )
+
+    if has_from:
+        start, error = _parse_window_bound(from_value, "from")
+        if error:
+            return None, error
+        end, error = _parse_window_bound(to_value, "to")
+        if error:
+            return None, error
+        if start > end:
+            return None, _window_error(
+                "'from' must not be after 'to'",
+                "window_invalid_order",
+            )
+        if end - start > timedelta(days=90):
+            return None, _window_error(
+                "Report window must not exceed 90 days",
+                "window_too_large",
+            )
+        return (
+            start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        ), None
+
+    days_value = request.args.get("days")
+    if days_value is None:
+        days = 7
+    else:
+        try:
+            days = int(days_value)
+        except (TypeError, ValueError):
+            return None, _window_error(
+                "'days' must be an integer",
+                "window_invalid_days",
+                "days",
+            )
+    days = max(1, min(days, 90))
+    end = utc_now()
+    start = utc_cutoff(days=days)
+    return (start, end), None
 
 
 def _get_comparison_data(storage):
@@ -39,16 +127,10 @@ def api_report():
     """Generate a PDF incident report."""
     _storage = get_storage()
     _config_manager = get_config_manager()
-    state = get_state()
-    analysis = state.get("analysis")
-    if not analysis:
-        return jsonify({"error": "No data available"}), 404
-
-    # Time range: default last 7 days, configurable via ?days=N
-    days = request.args.get("days", 7, type=int)
-    days = max(1, min(days, 90))
-    end_ts = utc_now()
-    start_ts = utc_cutoff(days=days)
+    window, error = _get_report_window()
+    if error:
+        return error
+    start_ts, end_ts = window
 
     snapshots = []
     if _storage:
@@ -61,7 +143,7 @@ def api_report():
             "modem_type": _config_manager.get("modem_type", ""),
         }
 
-    conn_info = state.get("connection_info") or {}
+    conn_info = (get_state().get("connection_info") or {})
     lang = request.args.get("lang", _get_lang())
     comparison_data = _get_comparison_data(_storage)
     customer_name = request.args.get("name", "")
@@ -70,14 +152,15 @@ def api_report():
 
     pdf_bytes = generate_report(
         snapshots,
-        analysis,
-        config,
-        conn_info,
-        lang,
+        config=config,
+        connection_info=conn_info,
+        lang=lang,
         comparison_data=comparison_data,
         customer_name=customer_name,
         customer_number=customer_number,
         customer_address=customer_address,
+        report_start=start_ts,
+        report_end=end_ts,
     )
 
     response = make_response(pdf_bytes)
@@ -93,14 +176,10 @@ def api_complaint():
     """Generate ISP complaint letter as text."""
     _storage = get_storage()
     _config_manager = get_config_manager()
-    analysis = get_state().get("analysis")
-    if not analysis:
-        return jsonify({"error": "No data available"}), 404
-
-    days = request.args.get("days", 7, type=int)
-    days = max(1, min(days, 90))
-    end_ts = utc_now()
-    start_ts = utc_cutoff(days=days)
+    window, error = _get_report_window()
+    if error:
+        return error
+    start_ts, end_ts = window
 
     snapshots = []
     if _storage:
@@ -145,10 +224,20 @@ def api_complaint():
     comparison_data = _get_comparison_data(_storage)
 
     text = generate_complaint_text(
-        snapshots, config, None, lang,
-        customer_name, customer_number, customer_address,
+        snapshots,
+        config,
+        None,
+        lang,
+        customer_name,
+        customer_number,
+        customer_address,
         bnetz_data=bnetz_data,
-        current_analysis=analysis,
         comparison_data=comparison_data,
+        report_start=start_ts,
+        report_end=end_ts,
     )
-    return jsonify({"text": text, "lang": lang})
+    return jsonify({
+        "text": text,
+        "lang": lang,
+        "window": {"from": start_ts, "to": end_ts},
+    })

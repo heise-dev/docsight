@@ -224,7 +224,7 @@ class SnapshotMethods:
                 (anchor_start, start_ts),
             ).fetchall()
             visible_rows = conn.execute(
-                "SELECT timestamp, summary_json, ds_channels_json, us_channels_json "
+                "SELECT timestamp, summary_json, ds_channels_json, us_channels_json, analysis_meta_json "
                 "FROM snapshots WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
                 (start_ts, end_ts),
             ).fetchall()
@@ -241,6 +241,7 @@ class SnapshotMethods:
                 "summary": _normalize_summary_errors(json.loads(row[1])),
                 "ds_channels": json.loads(row[2]),
                 "us_channels": json.loads(row[3]),
+                "analysis_meta": _load_analysis_meta(row[4]),
             })
         unwrap_uint32_counter_series(
             (entry["summary"] for entry in [*anchor_entries, *visible_entries]),

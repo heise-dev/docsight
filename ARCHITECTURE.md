@@ -685,7 +685,8 @@ CREATE TABLE bnetz_measurements (
 | `/api/tokens` | GET/POST | List or create API tokens (POST requires session auth) |
 | `/api/tokens/<id>` | DELETE | Revoke an API token (requires session auth) |
 | `/api/export` | GET | AI/LLM-oriented markdown export; browser UI applies local preview, scope, and redaction controls |
-| `/api/report` | GET | PDF evidence package for complaint/report workflows |
+| `/api/report` | GET | PDF evidence package from stored snapshots; accepts rolling `days` or an exact timezone-aware `from`/`to` window (maximum 90 days) |
+| `/api/complaint` | GET | Localized complaint text from the same stored-snapshot window; returns the normalized UTC window with the generated text |
 | `/api/bnetz/upload` | POST | Upload BNetzA measurement (PDF or CSV) |
 | `/api/bnetz/measurements` | GET | List BNetzA measurements |
 | `/api/bnetz/pdf/<id>` | GET | Download original measurement PDF |
