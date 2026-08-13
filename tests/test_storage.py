@@ -79,6 +79,9 @@ class TestSnapshotStorage:
             },
         }
 
+        range_row = storage.get_range_data(ts, ts)[0]
+        assert range_row["analysis_meta"] == snap["analysis_meta"]
+
     def test_unavailable_app_version_is_recorded_as_null(self, storage, sample_analysis, monkeypatch):
         monkeypatch.setattr(snapshot_module, "get_available_app_version", lambda: None)
 
@@ -158,6 +161,10 @@ class TestSnapshotStorage:
 
         assert snap is not None
         assert snap["analysis_meta"] is None
+        range_row = storage.get_range_data(
+            "2026-07-02T00:00:00Z", "2026-07-02T00:00:00Z"
+        )[0]
+        assert range_row["analysis_meta"] is None
         assert snap["raw_data"] is None
         with sqlite3.connect(storage.db_path) as conn:
             snapshot_cols = {row[1] for row in conn.execute("PRAGMA table_info(snapshots)")}
@@ -379,6 +386,38 @@ class TestSnapshotStorage:
         assert range_data[0]["summary"]["ds_correctable_errors"] == 4_794_967_296
         assert range_data[0]["ds_channels"] == [{"channel_id": 1}]
         assert range_data[0]["us_channels"] == [{"channel_id": 2}]
+
+    def test_range_data_includes_snapshots_exactly_on_both_bounds(self, storage):
+        """Exact report windows retain snapshots at both inclusive boundaries."""
+        with sqlite3.connect(storage.db_path) as conn:
+            for timestamp, channel_id in [
+                ("2026-06-01T00:00:00Z", 1),
+                ("2026-06-01T12:00:00Z", 2),
+                ("2026-06-02T00:00:00Z", 3),
+            ]:
+                conn.execute(
+                    "INSERT INTO snapshots "
+                    "(timestamp, summary_json, ds_channels_json, us_channels_json) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        timestamp,
+                        json.dumps({"health": "good", "errors_supported": False}),
+                        json.dumps([{"channel_id": channel_id}]),
+                        "[]",
+                    ),
+                )
+
+        rows = storage.get_range_data(
+            "2026-06-01T00:00:00Z",
+            "2026-06-02T00:00:00Z",
+        )
+
+        assert [row["timestamp"] for row in rows] == [
+            "2026-06-01T00:00:00Z",
+            "2026-06-01T12:00:00Z",
+            "2026-06-02T00:00:00Z",
+        ]
+        assert [row["ds_channels"][0]["channel_id"] for row in rows] == [1, 2, 3]
 
     def test_empty_storage(self, storage):
         assert storage.get_snapshot_list() == []

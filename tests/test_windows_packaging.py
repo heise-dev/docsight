@@ -64,6 +64,17 @@ def test_windows_packaging_files_exist():
         assert (WINDOWS_PACKAGING / relative).is_file()
 
 
+def test_windows_smoke_accepts_empty_report_pdf_without_logging_binary_body():
+    smoke = (WINDOWS_PACKAGING / "smoke_test.ps1").read_text(encoding="utf-8")
+
+    assert "function Assert-PdfResponse" in smoke
+    assert "-Response $EmptyReportResponse" in smoke
+    assert '-Context "Clean /api/report"' in smoke
+    assert "Expected clean /api/report to return HTTP 404" not in smoke
+    assert "$EmptyReportResponse.Body" not in smoke
+    assert "Packaged /api/report failed with HTTP $($LastReportResponse.StatusCode): $($LastReportResponse.Body)" not in smoke
+
+
 def test_pyinstaller_spec_collects_app_tree_and_version_file():
     spec_text = (WINDOWS_PACKAGING / "docsight.spec").read_text(encoding="utf-8")
 

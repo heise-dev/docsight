@@ -130,6 +130,26 @@ function Invoke-SmokeHttpRequest {
     }
 }
 
+function Assert-PdfResponse {
+    param(
+        [Parameter(Mandatory = $true)]$Response,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    if ($Response.StatusCode -ne 200) {
+        throw "$Context returned HTTP $($Response.StatusCode) with Content-Type '$($Response.ContentType)' and $($Response.Bytes.Length) bytes."
+    }
+    if ($Response.ContentType -ne "application/pdf") {
+        throw "$Context returned Content-Type '$($Response.ContentType)' instead of 'application/pdf' ($($Response.Bytes.Length) bytes)."
+    }
+    if (
+        $Response.Bytes.Length -lt 5 -or
+        [System.Text.Encoding]::ASCII.GetString($Response.Bytes, 0, 5) -ne "%PDF-"
+    ) {
+        throw "$Context response does not begin with %PDF- ($($Response.Bytes.Length) bytes)."
+    }
+}
+
 function Assert-NoPackagedProcess {
     $PackagedProcesses = @(Get-CimInstance Win32_Process | Where-Object {
         -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
@@ -434,19 +454,13 @@ try {
     }
 
     $EmptyReportResponse = Invoke-SmokeHttpRequest -Url $ReportUrl
-    if ($EmptyReportResponse.StatusCode -ne 404) {
-        Write-SmokeLog
-        throw "Expected clean /api/report to return HTTP 404, got $($EmptyReportResponse.StatusCode): $($EmptyReportResponse.Body)"
-    }
     try {
-        $EmptyReportPayload = $EmptyReportResponse.Body | ConvertFrom-Json
+        Assert-PdfResponse `
+            -Response $EmptyReportResponse `
+            -Context "Clean /api/report"
     } catch {
         Write-SmokeLog
-        throw "Clean /api/report did not return the Reports module JSON response: $($EmptyReportResponse.Body)"
-    }
-    if ($EmptyReportPayload.error -ne "No data available") {
-        Write-SmokeLog
-        throw "Clean /api/report returned unexpected JSON error '$($EmptyReportPayload.error)'."
+        throw
     }
 
     $SetupJson = @{modem_type = "generic"} | ConvertTo-Json -Compress
@@ -475,12 +489,9 @@ try {
             $PdfResponse = $LastReportResponse
             break
         }
-        if (
-            $LastReportResponse.StatusCode -ne 404 -or
-            $LastReportResponse.Body -notmatch "No data available"
-        ) {
+        if ($LastReportResponse.StatusCode -ne 404) {
             Write-SmokeLog
-            throw "Packaged /api/report failed with HTTP $($LastReportResponse.StatusCode): $($LastReportResponse.Body)"
+            throw "Packaged /api/report returned HTTP $($LastReportResponse.StatusCode) with Content-Type '$($LastReportResponse.ContentType)' and $($LastReportResponse.Bytes.Length) bytes while waiting for setup data."
         }
         Start-Sleep -Milliseconds 500
     }
@@ -489,16 +500,13 @@ try {
         $LastStatus = if ($null -ne $LastReportResponse) { $LastReportResponse.StatusCode } else { "no response" }
         throw "Packaged /api/report did not produce a PDF within $TimeoutSeconds seconds (last status: $LastStatus)."
     }
-    if ($PdfResponse.ContentType -ne "application/pdf") {
+    try {
+        Assert-PdfResponse `
+            -Response $PdfResponse `
+            -Context "Packaged /api/report"
+    } catch {
         Write-SmokeLog
-        throw "Packaged /api/report returned Content-Type '$($PdfResponse.ContentType)' instead of 'application/pdf'."
-    }
-    if (
-        $PdfResponse.Bytes.Length -lt 5 -or
-        [System.Text.Encoding]::ASCII.GetString($PdfResponse.Bytes, 0, 5) -ne "%PDF-"
-    ) {
-        Write-SmokeLog
-        throw "Packaged /api/report response does not begin with %PDF-."
+        throw
     }
 
     if (-not (Test-Path -LiteralPath $LauncherLogFile)) {

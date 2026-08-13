@@ -141,7 +141,10 @@ def test_generate_report_wraps_long_german_health_issues(monkeypatch):
         },
     }
 
-    generate_report([], analysis, lang="de")
+    generate_report(
+        [{"timestamp": "2026-05-01T00:00:00Z", **analysis}],
+        lang="de",
+    )
 
     assert issue_render["w"] == 0
     assert issue_render["h"] == 6
