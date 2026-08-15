@@ -5,9 +5,7 @@ Tests cover: hero chart, trend charts, channel charts, compare charts,
 zoom modal, theme switching, responsive sizing, and crosshair sync.
 """
 
-import pytest
 from playwright.sync_api import expect
-
 
 # ── Helpers ──
 
@@ -25,13 +23,25 @@ def navigate_to_channels(page):
 
 
 def wait_for_uplot(page, container_id, timeout=5000):
-    """Wait for a uPlot chart to render inside a container."""
-    page.wait_for_selector(f"#{container_id} .uplot", timeout=timeout)
+    """Wait for a complete uPlot canvas, not its transient empty wrapper."""
+    page.wait_for_selector(f"#{container_id} .uplot canvas", timeout=timeout)
 
 
 def count_uplot_canvases(page, container_id):
     """Count uPlot canvas elements inside a container."""
     return page.locator(f"#{container_id} .uplot canvas").count()
+
+
+def wait_for_uplot_replacement(page, container_id, previous_canvas, timeout=5000):
+    """Wait until an asynchronous theme refresh installs a new canvas."""
+    page.wait_for_function(
+        f"""previous => {{
+            const current = document.querySelector('#{container_id} .uplot canvas');
+            return current && current !== previous && current.isConnected;
+        }}""",
+        arg=previous_canvas,
+        timeout=timeout,
+    )
 
 
 def has_no_console_errors(page):
@@ -71,21 +81,32 @@ class TestHeroChart:
     def test_hero_chart_rerenders_on_theme_toggle(self, demo_page):
         """Hero chart should re-render when theme is toggled."""
         wait_for_uplot(demo_page, "hero-trend-chart")
+        canvas = demo_page.locator("#hero-trend-chart .uplot canvas").first
+        previous_canvas = canvas.element_handle()
+        assert previous_canvas is not None
         # Use JS to toggle theme directly (checkbox may be hidden in sidebar)
         demo_page.evaluate("""
             var toggle = document.getElementById('theme-toggle-sidebar');
             if (toggle) { toggle.checked = !toggle.checked; toggle.dispatchEvent(new Event('change')); }
         """)
-        wait_for_uplot(demo_page, "hero-trend-chart")
+        wait_for_uplot_replacement(
+            demo_page, "hero-trend-chart", previous_canvas
+        )
+        previous_canvas.dispose()
         # Chart should still be present after theme toggle
         canvases = count_uplot_canvases(demo_page, "hero-trend-chart")
         assert canvases >= 1
         # Toggle back
+        previous_canvas = canvas.element_handle()
+        assert previous_canvas is not None
         demo_page.evaluate("""
             var toggle = document.getElementById('theme-toggle-sidebar');
             if (toggle) { toggle.checked = !toggle.checked; toggle.dispatchEvent(new Event('change')); }
         """)
-        demo_page.wait_for_timeout(300)
+        wait_for_uplot_replacement(
+            demo_page, "hero-trend-chart", previous_canvas
+        )
+        previous_canvas.dispose()
 
 
 # ── Trend Charts ──
