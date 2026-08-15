@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
+from bs4 import BeautifulSoup
 from jinja2 import Template
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,6 +110,17 @@ def collect_template_asset_urls(text: str) -> set[str]:
     return urls
 
 
+def executable_inline_scripts(text: str):
+    """Return executable inline scripts using an HTML parser, not filtering regexes."""
+    soup = BeautifulSoup(text, "html.parser")
+    return [
+        script
+        for script in soup.find_all("script")
+        if not script.get("src")
+        and str(script.get("type", "")).strip().lower() != "application/json"
+    ]
+
+
 def generated_js_css_reference_is_versioned(value: str) -> bool:
     return (
         "?v={{ version|urlencode }}" in value
@@ -198,6 +210,57 @@ def test_templates_reference_existing_static_assets() -> None:
                 missing.append(f"{source.relative_to(ROOT)} -> {url}")
 
     assert missing == []
+
+
+def test_inline_script_scanner_handles_malformed_end_tag_variants() -> None:
+    source = '<script type="text/javascript">alert(1)</script\t\n bogus>'
+
+    scripts = executable_inline_scripts(source)
+
+    assert len(scripts) == 1
+    assert "alert(1)" in scripts[0].get_text()
+
+
+def test_templates_have_no_executable_inline_script_bodies_and_new_assets_exist() -> None:
+    """Bootstrap data may be inline JSON, but browser behavior must live in assets."""
+    template_paths = sorted(TEMPLATES.rglob("*.html")) + sorted(MODULES.glob("*/templates/*.html"))
+    offenders = []
+    for path in template_paths:
+        text = path.read_text(encoding="utf-8")
+        for script in executable_inline_scripts(text):
+            offenders.append(f"{path.relative_to(ROOT)}:{script.sourceline or '?'}")
+
+    required_assets = {
+        TEMPLATES / "index.html": [
+            STATIC / "js" / "browser-contracts.js",
+            STATIC / "js" / "dashboard-donuts.js",
+            STATIC / "js" / "dashboard.js",
+            STATIC / "js" / "dashboard-routing.js",
+            STATIC / "js" / "service-worker-registration.js",
+        ],
+        TEMPLATES / "setup.html": [
+            STATIC / "js" / "browser-contracts.js",
+            STATIC / "js" / "setup.js",
+        ],
+        TEMPLATES / "settings.html": [
+            STATIC / "js" / "browser-contracts.js",
+            STATIC / "js" / "settings-bootstrap.js",
+        ],
+        MODULES / "connection_monitor" / "templates" / "connection_monitor_settings.html": [
+            MODULES / "connection_monitor" / "static" / "js" / "connection-monitor-settings.js",
+        ],
+    }
+    missing_or_unreferenced = []
+    for template, assets in required_assets.items():
+        source = template.read_text(encoding="utf-8")
+        for asset in assets:
+            if not asset.is_file() or asset.name not in source:
+                missing_or_unreferenced.append(
+                    f"{template.relative_to(ROOT)} -> {asset.relative_to(ROOT)}"
+                )
+
+    assert offenders == []
+    assert missing_or_unreferenced == []
 
 
 def test_template_static_js_and_css_urls_are_versioned() -> None:

@@ -3,6 +3,7 @@
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 from bs4 import BeautifulSoup
 
@@ -57,18 +58,13 @@ class TestSettingsRoute:
             html = response.data.decode("utf-8")
 
             assert response.status_code == 200
-            module_match = re.search(
-                r"var MODULE_SECRET_FIELDS = (\[[^;]*\]);", html
-            )
-            saved_match = re.search(
-                r"var SAVED_MODULE_SECRET_FIELDS = (\[[^;]*\]);", html
-            )
-            assert module_match is not None
-            assert saved_match is not None
-            module_fields = json.loads(module_match.group(1))
-            saved_fields = json.loads(saved_match.group(1))
-            assert key in module_fields
-            assert key in saved_fields
+            soup = BeautifulSoup(html, "html.parser")
+            bootstrap = soup.find("script", id="docsight-settings-bootstrap")
+            assert bootstrap is not None
+            assert bootstrap.get("type") == "application/json"
+            bootstrap_data = json.loads(bootstrap.get_text())
+            assert key in bootstrap_data["moduleSecretFields"]
+            assert key in bootstrap_data["savedModuleSecretFields"]
             assert "runtime-secret-value" not in html
         finally:
             config_module.set_module_secret_registry(previous_keys, previous_owners)
@@ -76,6 +72,46 @@ class TestSettingsRoute:
                 config_module.DEFAULTS[key] = previous_default
             else:
                 config_module.DEFAULTS.pop(key, None)
+
+    def test_settings_bootstrap_falls_back_for_module_without_label_key(self, client):
+        module = SimpleNamespace(
+            id="community.runtime",
+            name="Runtime Module",
+            menu={},
+            enabled=True,
+            has_css=False,
+            has_js=False,
+            template_paths={"settings": "settings/about.html"},
+        )
+
+        class Loader:
+            @staticmethod
+            def get_enabled_modules():
+                return [module]
+
+            @staticmethod
+            def get_modules():
+                return [module]
+
+            @staticmethod
+            def get_theme_modules():
+                return []
+
+        previous_loader = current_runtime().module_loader
+        current_runtime().module_loader = Loader()
+        try:
+            response = client.get("/settings?lang=en")
+        finally:
+            current_runtime().module_loader = previous_loader
+
+        assert response.status_code == 200
+        soup = BeautifulSoup(response.get_data(as_text=True), "html.parser")
+        bootstrap = soup.find("script", id="docsight-settings-bootstrap")
+        assert bootstrap is not None
+        data = json.loads(bootstrap.get_text())
+        assert data["modules"] == [
+            {"id": "community.runtime", "labelKey": "", "name": "Runtime Module"}
+        ]
 
     def test_settings_extensions_panel_lists_rendered_feature_toggles(self, client):
         resp = client.get("/settings?lang=en")
