@@ -2,7 +2,7 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [main]
+    branches: [main, deploy]
     tags: ['v*']
     # GitHub does not evaluate path filters for tag pushes, so v* builds
     # remain unconditional while main pushes stay limited to image inputs.
@@ -51,6 +51,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=deploy,enable=${{ github.ref == 'refs/heads/deploy' }}
             type=ref,event=tag
             type=sha,enable=${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v') }}
 

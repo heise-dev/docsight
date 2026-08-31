@@ -235,8 +235,10 @@ def test_docker_paths_tags_manual_and_concurrency_contract():
     workflow = load_workflow("docker.yml")
     triggers = workflow["on"]
 
+    # Fork-only: the deploy branch publishes ghcr.io/<fork>/docsight:deploy
+    # for Lukas' Unraid box. Never include this change in an upstream PR.
     assert triggers["push"] == {
-        "branches": ["main"],
+        "branches": ["main", "deploy"],
         "tags": ["v*"],
         "paths": DOCKER_PATHS,
     }
