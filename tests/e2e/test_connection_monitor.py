@@ -69,3 +69,29 @@ def test_connection_monitor_mobile_surfaces_raw_ping_log_without_deep_scroll(dem
     assert 0 <= button_box["y"]
     assert panel_box["y"] < chart_box["y"], "raw log panel should appear before the long chart stack"
     assert button_box["y"] + button_box["height"] <= 844, "raw log download actions should be fully visible without deep mobile scrolling"
+
+
+def test_connection_monitor_hidden_source_survives_data_refresh(demo_page):
+    """Hiding a source via the chart legend must persist across the live data refresh."""
+    page = demo_page
+    page.evaluate("switchView('connection-monitor')")
+    page.wait_for_selector("#view-connection-monitor.active", state="visible")
+    page.wait_for_selector("#cm-combined-chart .u-legend tr.u-series", state="visible")
+
+    legend_rows = page.locator("#cm-combined-chart .u-legend tr.u-series")
+    assert legend_rows.count() >= 2, "combined chart should plot at least two monitored targets"
+    hidden_row = legend_rows.nth(1)
+    hidden_label = hidden_row.inner_text().strip()
+
+    hidden_row.locator("th").click()
+    expect(hidden_row).to_have_class("u-series u-off")
+
+    # Mark the live instance so we can wait for the refresh to rebuild the chart
+    page.evaluate("charts['cm-combined-chart']._e2eStale = true")
+    page.locator("#view-connection-monitor [data-cm-range='3600']").click()
+    page.wait_for_function("() => charts['cm-combined-chart'] && !charts['cm-combined-chart']._e2eStale")
+
+    refreshed_rows = page.locator("#cm-combined-chart .u-legend tr.u-series")
+    expect(refreshed_rows.nth(1)).to_have_text(hidden_label)
+    expect(refreshed_rows.nth(1)).to_have_class("u-series u-off")
+    expect(refreshed_rows.nth(0)).to_have_class("u-series")
