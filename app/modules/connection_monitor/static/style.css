@@ -347,7 +347,9 @@
 
 .cm-chart-mount {
     min-width: 0;
-    min-height: 320px;
+    /* Matches renderChart's minHeight for this chart, so the mount never reserves
+       dead space between the x-axis and the controls strip below it. */
+    min-height: 260px;
 }
 
 /* A user-initiated refetch (zoom, reset, range switch) can take seconds on a
@@ -356,27 +358,69 @@
     opacity: 0.4;
 }
 
-/* Controls strip below the chart: replaces uPlot's built-in legend, so every
-   row must wrap rather than push the panel into a horizontal scroll. */
+/* Controls strip below the chart: replaces uPlot's built-in legend. The target
+   list keeps its own column so the global toggles can sit on the right edge. */
 .cm-chart-controls {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px 16px;
+    align-items: flex-start;
+    gap: 8px 16px;
     min-width: 0;
     margin-top: 8px;
 }
 
+.cm-chart-target-list {
+    flex: 1 1 auto;
+    max-width: 60%;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
 .cm-chart-control-row {
     display: flex;
-    flex-wrap: wrap;
     align-items: center;
-    gap: 4px;
+    gap: 8px;
+    min-height: 32px;
     min-width: 0;
 }
 
-/* The global toggles always start their own line, however the target rows pack */
+.cm-chart-control-row + .cm-chart-control-row {
+    border-top: 1px solid var(--cm-panel-border);
+}
+
+/* The target name is the line toggle, so it claims the whole left column */
+.cm-chart-target {
+    display: flex;
+    flex: 1 1 auto;
+    align-items: center;
+    min-width: 0;
+    min-height: 24px;
+    padding: 2px 6px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+}
+
+.cm-chart-target:hover {
+    background: var(--cm-panel-hover);
+}
+
+.cm-chart-target[aria-pressed="false"] {
+    opacity: 0.45;
+}
+
+/* The globals are a block of their own, pinned to the strip's right edge */
 .cm-chart-control-globals {
-    flex-basis: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-self: flex-start;
+    gap: 6px;
+    margin-left: auto;
 }
 
 .cm-chart-control-label {
@@ -407,6 +451,13 @@
 .cm-chart-toggle:disabled {
     cursor: not-allowed;
     opacity: 0.4;
+}
+
+/* Fixed right-hand column, so the band toggles line up across the rows */
+.cm-chart-control-row .cm-chart-toggle {
+    flex: 0 0 auto;
+    min-width: 54px;
+    text-align: center;
 }
 
 .cm-chart-loading {
@@ -910,10 +961,6 @@
         min-height: 360px;
     }
 
-    .cm-chart-mount {
-        min-height: 260px;
-    }
-
     .cm-export-group,
     .cm-traceroute-actions {
         display: grid;
@@ -943,6 +990,18 @@
 
     #cm-per-target-stats .cm-target-table tr {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 640px) {
+    .cm-chart-target-list {
+        flex-basis: 100%;
+        max-width: none;
+    }
+
+    .cm-chart-control-globals {
+        flex-basis: 100%;
+        justify-content: flex-end;
     }
 }
 

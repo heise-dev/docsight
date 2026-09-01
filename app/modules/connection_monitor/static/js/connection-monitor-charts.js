@@ -95,33 +95,45 @@ var CMCharts = (function() {
         return btn;
     }
 
+    /* The target name itself is the line toggle, so the whole row is one big hit area. */
+    function targetButton(row) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'cm-chart-target';
+        btn.dataset.toggle = 'line';
+        btn.dataset.target = String(row.id);
+        var dot = document.createElement('span');
+        dot.className = 'cm-target-dot';
+        dot.style.background = row.color;
+        btn.appendChild(dot);
+        var name = document.createElement('span');
+        name.className = 'cm-chart-control-label';
+        name.textContent = row.label;
+        btn.appendChild(name);
+        if (row.host) {
+            var hostSpan = document.createElement('span');
+            hostSpan.className = 'cm-target-host';
+            hostSpan.textContent = '(' + row.host + ')';
+            btn.appendChild(hostSpan);
+        }
+        btn.onclick = function() { toggleControl('line', row.id); };
+        return btn;
+    }
+
     function buildControlsStrip(container, rows) {
-        var lLine = container.dataset.lLine || 'line';
         var lBand = container.dataset.lBand || 'band';
         var lLoss = container.dataset.lLossMarkers || 'loss markers';
         var lClip = container.dataset.lClipSpikes || 'clip spikes';
         var lNoBand = container.dataset.lNoBand || 'No min/max values in this view';
 
         container.textContent = '';
+        var list = document.createElement('ul');
+        list.className = 'cm-chart-target-list';
         rows.forEach(function(row) {
-            var line = document.createElement('div');
+            var line = document.createElement('li');
             line.className = 'cm-chart-control-row';
-            var dot = document.createElement('span');
-            dot.className = 'cm-target-dot';
-            dot.style.background = row.color;
-            line.appendChild(dot);
-            var name = document.createElement('span');
-            name.className = 'cm-chart-control-label';
-            name.textContent = row.label;
-            line.appendChild(name);
-            if (row.host) {
-                var hostSpan = document.createElement('span');
-                hostSpan.className = 'cm-target-host';
-                hostSpan.textContent = '(' + row.host + ')';
-                line.appendChild(hostSpan);
-            }
+            line.appendChild(targetButton(row));
             var targetName = row.label + (row.host ? ' (' + row.host + ')' : '');
-            line.appendChild(controlButton(lLine, 'line', row.id, targetName));
             var band = controlButton(lBand, 'band', row.id, targetName);
             if (!row.hasBand) {
                 // Disabled rather than hidden, so the row layout does not jump per range
@@ -129,18 +141,19 @@ var CMCharts = (function() {
                 band.title = lNoBand;
             }
             line.appendChild(band);
-            container.appendChild(line);
+            list.appendChild(line);
         });
+        container.appendChild(list);
 
         var globals = document.createElement('div');
-        globals.className = 'cm-chart-control-row cm-chart-control-globals';
+        globals.className = 'cm-chart-control-globals';
         globals.appendChild(controlButton(lLoss, 'loss', null));
         globals.appendChild(controlButton(lClip, 'clip', null));
         container.appendChild(globals);
     }
 
     function syncControlsStrip(container) {
-        var buttons = container.querySelectorAll('.cm-chart-toggle');
+        var buttons = container.querySelectorAll('button[data-toggle]');
         for (var i = 0; i < buttons.length; i++) {
             var btn = buttons[i];
             var toggle = btn.dataset.toggle;
@@ -153,9 +166,10 @@ var CMCharts = (function() {
     }
 
     /**
-     * Render the controls strip below the chart: one row per target plus the global
-     * toggles. The DOM is rebuilt only when the target signature changes, so the
-     * 10s refresh never steals focus from a button the user is on.
+     * Render the controls strip below the chart: a list with one row per target
+     * (the name is the line toggle, the band toggle sits in the right column) plus
+     * the global toggles. The DOM is rebuilt only when the target signature changes,
+     * so the 10s refresh never steals focus from a button the user is on.
      * @param {Array} rows - [{id, label, host, color, hasBand}]
      */
     function renderControlsStrip(rows) {
