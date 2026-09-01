@@ -639,6 +639,10 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
         }
     ];
 
+    /* uPlot reserves 50px for the x axis; a caller that knows its labels fit in less
+       can hand back the difference. Opt-in, so every other chart keeps the default. */
+    if (opts && typeof opts.xAxisSize === 'number') axes[0].size = opts.xAxisSize;
+
     /* Custom y-axis tick labels (e.g., QAM modulation) */
     if (opts && opts.yTickCallback) {
         var origTickCb = opts.yTickCallback;
