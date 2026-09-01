@@ -83,14 +83,17 @@ def _requested_window(url):
     return float(params["start"][0]), float(params["end"][0])
 
 
-def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned_days=None, state=None,
-                                 interval=60):
+def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned_days=None,
+                                 state=None, interval=60, meta=None, target_metas=None):
     """Serve deterministic Connection Monitor data: one target, one latency outlier.
 
     Samples are served only inside the requested window, so a fetch that narrows
     the window visibly narrows the chart. Pass ``state`` to collect the sample
     timestamps and every requested window, or ``interval`` to space the samples
-    closer than a minute apart.
+    closer than a minute apart. ``meta`` chooses the tiers the samples
+    envelope reports - a dict, or a callable taking the request URL when the
+    answer depends on the resolution asked for. ``target_metas`` instead serves
+    one target per entry, each with its own envelope meta.
     """
     now = int(time.time())
     samples = [
@@ -112,7 +115,11 @@ def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned
         if "/pinned-days" in url:
             route.fulfill(json=pinned_days or [])
         elif "/targets" in url:
-            route.fulfill(json=[{"id": 1, "label": "Router", "host": "192.168.1.1", "enabled": True}])
+            route.fulfill(json=[
+                {"id": i + 1, "label": f"Router {i + 1}" if target_metas else "Router",
+                 "host": f"192.168.1.{i + 1}", "enabled": True}
+                for i in range(len(target_metas) if target_metas else 1)
+            ])
         elif "/samples/" in url:
             window = _requested_window(url)
             served = samples
@@ -126,7 +133,13 @@ def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned
                     "max_points": int(params["max_points"][0]) if "max_points" in params else None,
                     "url": url,
                 })
-            route.fulfill(json={"meta": {"resolution": "raw"}, "samples": served})
+            if target_metas:
+                served_meta = target_metas[int(url.split("/samples/")[1].split("?")[0]) - 1]
+            elif callable(meta):
+                served_meta = meta(url)
+            else:
+                served_meta = meta or {"resolution": "raw"}
+            route.fulfill(json={"meta": served_meta, "samples": served})
         elif "/capability" in url:
             route.fulfill(json={"method": "icmp"})
         else:
@@ -706,3 +719,104 @@ def test_connection_monitor_zoom_window_header_names_the_zoomed_window(demo_page
         "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._e2eStale"
     )
     expect(header).to_be_hidden()
+
+
+def _capture_export_links(page):
+    """Record the export download URLs instead of letting the browser fetch them."""
+    page.evaluate(
+        """() => {
+            window.__cmExportUrls = [];
+            document.addEventListener('click', (e) => {
+                const a = e.target.closest && e.target.closest('a[download]');
+                if (a) { window.__cmExportUrls.push(a.getAttribute('href')); e.preventDefault(); }
+            }, true);
+        }"""
+    )
+
+
+def test_connection_monitor_csv_export_asks_for_the_served_tier(demo_page):
+    """A window served from the 1-min tier must not export resolution=raw (an empty file)."""
+    page = demo_page
+    _stub_connection_monitor_api(page, meta={
+        "resolution": "raw", "bucket_seconds": None, "blended": True,
+        "mixed": False, "tiers_used": ["1min"],
+    })
+    _open_connection_monitor_chart(page)
+    _capture_export_links(page)
+
+    page.locator("#cm-export-links .cm-chip-btn").first.click()
+    page.wait_for_function("() => window.__cmExportUrls.length === 1")
+
+    params = parse_qs(urlparse(page.evaluate("() => window.__cmExportUrls[0]")).query)
+    assert params["resolution"] == ["1min"], "export must request the tier the chart was served from"
+
+
+def test_connection_monitor_csv_export_of_a_blended_window_asks_for_auto(demo_page):
+    """The tiers are exclusive, so a mixed window can only be exported tier by tier."""
+    page = demo_page
+    _stub_connection_monitor_api(page, meta={
+        "resolution": "1min", "bucket_seconds": 60, "blended": True,
+        "mixed": True, "tiers_used": ["raw", "1min"],
+    })
+    _open_connection_monitor_chart(page)
+    _capture_export_links(page)
+
+    page.locator("#cm-export-links .cm-chip-btn").first.click()
+    page.wait_for_function("() => window.__cmExportUrls.length === 1")
+
+    params = parse_qs(urlparse(page.evaluate("() => window.__cmExportUrls[0]")).query)
+    assert params["resolution"] == ["auto"]
+
+
+def test_connection_monitor_csv_export_follows_each_targets_own_tier(demo_page):
+    """tiers_used is per target, so one target's tier must not decide another's export."""
+    page = demo_page
+    _stub_connection_monitor_api(page, target_metas=[
+        {"resolution": "raw", "bucket_seconds": None, "blended": True,
+         "mixed": False, "tiers_used": ["1min"]},
+        {"resolution": "raw", "bucket_seconds": None, "blended": True,
+         "mixed": False, "tiers_used": ["raw"]},
+    ])
+    _open_connection_monitor_chart(page)
+    _capture_export_links(page)
+
+    buttons = page.locator("#cm-export-links .cm-chip-btn")
+    expect(buttons).to_have_count(2)
+    buttons.nth(0).click()
+    buttons.nth(1).click()
+    page.wait_for_function("() => window.__cmExportUrls.length === 2")
+
+    exported = page.evaluate("() => window.__cmExportUrls")
+    resolutions = [parse_qs(urlparse(url).query)["resolution"][0] for url in exported]
+    assert resolutions == ["1min", "raw"], "each target must export the tier it was served"
+
+
+def test_connection_monitor_pinned_day_indicator_reports_the_served_tier(demo_page):
+    """A zoom inside a pinned day drops resolution=raw, so the label must drop it too."""
+    page = demo_page
+    now = int(time.time())
+    pinned_date = time.strftime("%Y-%m-%d", time.localtime(now))
+
+    def served_meta(url):
+        # The pinned day itself is read raw; a zoom inside it refetches by data
+        # age, which past the raw retention window yields stored aggregates
+        if "resolution=raw" in url:
+            return {"resolution": "raw", "bucket_seconds": None, "blended": False,
+                    "mixed": False, "tiers_used": ["raw"]}
+        return {"resolution": "raw", "bucket_seconds": 60, "blended": True,
+                "mixed": False, "tiers_used": ["1min"]}
+
+    _stub_connection_monitor_api(
+        page,
+        pinned_days=[{"date": pinned_date, "label": "",
+                      "utc_start": now - 86400, "utc_end": now + 60}],
+        meta=served_meta,
+    )
+    _open_connection_monitor_chart(page)
+
+    page.locator("#cm-pinned-days .cm-chip-btn").first.click()
+    indicator = page.locator("#cm-resolution-indicator")
+    expect(indicator).to_have_text(f"Pinned: {pinned_date} (Raw samples)")
+
+    _rezoom_cm_chart(page, 60, 120)
+    expect(indicator).to_have_text(f"Pinned: {pinned_date} (1-min averages)")
