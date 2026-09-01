@@ -11,10 +11,16 @@
     var refreshTimer = null;
     var lastResolution = 'raw';
     var pinnedDayView = null; // { date: 'YYYY-MM-DD', start: epoch, end: epoch } when viewing a pinned day
+    var zoomWindow = null; // { start, end, span, followLive } when the chart is zoomed into a sub-window
+    var loadSeq = 0; // guards against a slow response overwriting a newer one
 
     function updateRefreshInterval() {
         if (refreshTimer) clearInterval(refreshTimer);
         if (pinnedDayView) return; // no auto-refresh for pinned day views
+        // A fixed zoom window is a slice of the past — its data cannot change, so
+        // stop refetching it. This only stops the browser poll; ping collection
+        // keeps running server-side in the collector either way.
+        if (zoomWindow && !zoomWindow.followLive) return;
         var interval = currentRange <= 86400 ? 10000 : 60000;
         refreshTimer = setInterval(function() {
             var view = document.getElementById('cm-detail-view');
@@ -30,6 +36,7 @@
 
     window.cmSetRange = function(btn, seconds) {
         pinnedDayView = null;
+        zoomWindow = null;
         currentRange = seconds;
         document.querySelectorAll('[data-cm-range]').forEach(function(b) {
             b.classList.remove('active');
@@ -40,7 +47,48 @@
         updateRefreshInterval();
     };
 
+    // Absolute bounds of the zoom window. A zoom taken at the live edge keeps its
+    // span but slides with now, so new pings keep arriving in view.
+    function getZoomWindow() {
+        if (!zoomWindow.followLive) {
+            return { start: zoomWindow.start, end: zoomWindow.end };
+        }
+        var now = Date.now() / 1000;
+        return { start: now - zoomWindow.span, end: now };
+    }
+
+    // Called by the chart's zoom plugin: the dragged selection becomes the window
+    // that every following fetch asks for, so the view stops drifting with the poll
+    // and the refetch returns the best resolution stored for that age.
+    window.cmSetZoomWindow = function(start, end, atLastSample) {
+        if (start == null || end == null || !(end > start)) return;
+        // Only a selection that reaches the newest sample AND actually sits at the
+        // live edge follows now; a pinned day or a window into the past stays put.
+        // The tolerance never drops below 60s: a narrow selection can be shorter
+        // than the age of the newest sample, and misreading it as historical would
+        // freeze the chart with the refresh timer stopped.
+        var followLive = !!atLastSample && !pinnedDayView &&
+            (Date.now() / 1000) - end <= Math.max(end - start, 60);
+        zoomWindow = { start: start, end: end, span: end - start, followLive: followLive };
+        loadData();
+        updateRefreshInterval();
+    };
+
+    window.cmClearZoomWindow = function() {
+        if (!zoomWindow) return;
+        zoomWindow = null;
+        loadData();
+        updateRefreshInterval();
+    };
+
+    window.cmHasZoomWindow = function() {
+        return zoomWindow !== null;
+    };
+
     function getExportWindow() {
+        if (zoomWindow) {
+            return getZoomWindow();
+        }
         if (pinnedDayView) {
             return { start: pinnedDayView.start, end: pinnedDayView.end };
         }
@@ -151,6 +199,7 @@
                     .then(function() {
                         if (removedActiveDay) {
                             pinnedDayView = null;
+                            zoomWindow = null;
                             document.querySelectorAll('[data-cm-range]').forEach(function(b) {
                                 b.classList.toggle('active', Number(b.dataset.cmRange) === currentRange);
                             });
@@ -170,6 +219,7 @@
     }
 
     function viewPinnedDay(dateStr, utcStart, utcEnd) {
+        zoomWindow = null;
         pinnedDayView = {
             date: dateStr,
             start: utcStart,
@@ -252,21 +302,38 @@
     function loadData() {
         if (targets.length === 0) { showNoData(); return; }
 
+        var seq = ++loadSeq;
         var now = Date.now() / 1000;
         var start, end;
-        if (pinnedDayView) {
+        if (zoomWindow) {
+            var win = getZoomWindow();
+            start = win.start;
+            end = win.end;
+        } else if (pinnedDayView) {
             start = pinnedDayView.start;
             end = pinnedDayView.end;
         } else {
             start = now - currentRange;
             end = now;
         }
-        var maxPoints = pinnedDayView ? 0 : getMaxPointsForRange(currentRange);
+        var maxPoints;
+        if (zoomWindow) {
+            // Always cap a zoom window: below 24h getMaxPointsForRange asks for
+            // everything, which for a sub-day window of raw pings is far heavier
+            // than the capped range it was zoomed out of. The chart is never wider
+            // than ~1440px and the server leaves anything under the cap untouched.
+            maxPoints = Math.max(getMaxPointsForRange(end - start), 1440);
+        } else {
+            maxPoints = pinnedDayView ? 0 : getMaxPointsForRange(currentRange);
+        }
 
         // Fetch samples for ALL targets in parallel
         var samplePromises = targets.map(function(t) {
             var url = docsightUrl('/api/connection-monitor/samples/' + t.id + '?start=' + start + '&end=' + end + '&limit=0');
-            if (pinnedDayView) {
+            // A zoom window keeps the default auto resolution: it is served by data
+            // age, so an old window still yields the stored aggregates (raw would
+            // return nothing past the raw retention window).
+            if (pinnedDayView && !zoomWindow) {
                 url += '&resolution=raw';
             } else if (maxPoints > 0) {
                 url += '&max_points=' + maxPoints;
@@ -288,6 +355,9 @@
 
         Promise.all([Promise.all(samplePromises), Promise.all(outagePromises), statsPromise])
             .then(function(results) {
+                // A second zoom can be dragged while this one is still in flight;
+                // the newest load owns the view, so drop anything overtaken
+                if (seq !== loadSeq) return;
                 var allTargetData = results[0];
                 var allOutageData = results[1];
                 var statsByTarget = results[2] || {};
@@ -299,17 +369,35 @@
                 var hasSamples = allTargetData.some(function(td) {
                     return td.samples && td.samples.length > 0;
                 });
-                if (!hasSamples) { showNoData(); return; }
+                if (!hasSamples) {
+                    if (zoomWindow) {
+                        // Nothing stored in the zoomed window — drop back to the
+                        // parent range instead of leaving a blank chart behind
+                        zoomWindow = null;
+                        loadData();
+                        updateRefreshInterval();
+                        return;
+                    }
+                    showNoData();
+                    return;
+                }
 
                 var meta = allTargetData.length > 0 ? allTargetData[0].meta : null;
                 if (meta && meta.resolution) lastResolution = meta.resolution;
                 hideNoData();
                 CMCharts.renderStatsCards('cm-stats-cards', allTargetData);
                 CMCharts.renderPerTargetStats('cm-per-target-stats', allTargetData);
-                var chartRange = pinnedDayView ? 86400 : currentRange;
+                var chartRange = zoomWindow ? Math.max(Math.round(end - start), 1)
+                    : (pinnedDayView ? 86400 : currentRange);
                 // A pinned day shares the 1d range but is fetched at raw resolution, so
-                // fold its date into the x-domain key to keep the zoom windows separate
-                var chartDomainKey = pinnedDayView ? '86400s@' + pinnedDayView.date : null;
+                // fold its date into the x-domain key to keep the zoom windows separate.
+                // A zoom window is its own domain, keyed by its absolute bounds.
+                var chartDomainKey = null;
+                if (zoomWindow) {
+                    chartDomainKey = 'zoom@' + start + '-' + end;
+                } else if (pinnedDayView) {
+                    chartDomainKey = '86400s@' + pinnedDayView.date;
+                }
                 CMCharts.renderCombinedChart('cm-combined-chart', allTargetData, chartRange, chartDomainKey);
                 CMCharts.renderAvailabilityBand('cm-availability', allTargetData);
                 renderOutages(allOutageData);
@@ -461,7 +549,9 @@
             el.style.display = 'block';
             return;
         }
-        if (meta.mixed && Array.isArray(meta.tiers_used) && meta.tiers_used.length > 0) {
+        // tiers_used names what was actually served; meta.resolution is derived from
+        // the window span, which mislabels a short window over older, aggregated data
+        if (Array.isArray(meta.tiers_used) && meta.tiers_used.length > 0) {
             el.textContent = meta.tiers_used.map(function(tier) {
                 return labels[tier] || tier;
             }).join(' + ');

@@ -19,8 +19,30 @@ var CMCharts = (function() {
     /**
      * uPlot plugin: drag-to-zoom on X-axis, double-click to reset.
      * Requires zoomable:true in renderChart opts (disables fixed x-scale range).
+     * @param {Array<number>} [timestamps] - Epoch seconds per x index. When given, a
+     *   drag hands the selected absolute window to the detail view, which refetches
+     *   exactly that window so the zoom cannot drift away on the next poll.
      */
-    function zoomPlugin() {
+    function zoomPlugin(timestamps) {
+        // Fractional x index -> epoch seconds (linear between neighbouring samples)
+        function indexToTime(idx) {
+            var last = timestamps.length - 1;
+            if (idx <= 0) return timestamps[0];
+            if (idx >= last) return timestamps[last];
+            var i = Math.floor(idx);
+            return timestamps[i] + (timestamps[i + 1] - timestamps[i]) * (idx - i);
+        }
+        // The reset button must also show on a fresh instance built from a zoomed
+        // refetch, where the x-domain key changed and _zoomRange was dropped.
+        function isZoomed(u) {
+            if (u._zoomRange) return true;
+            return typeof window.cmHasZoomWindow === 'function' && window.cmHasZoomWindow();
+        }
+        function clearZoom(u) {
+            u._zoomRange = null;
+            if (typeof window.cmClearZoomWindow === 'function') window.cmClearZoomWindow();
+            u.setScale('x', { min: 0, max: u.data[0].length - 1 });
+        }
         function showResetBtn(u) {
             if (u._resetBtn) { u._resetBtn.style.display = ''; return; }
             var btn = document.createElement('button');
@@ -32,8 +54,7 @@ var CMCharts = (function() {
             btn.onmouseenter = function() { btn.style.color = '#fff'; };
             btn.onmouseleave = function() { btn.style.color = '#ccc'; };
             btn.onclick = function() {
-                u._zoomRange = null;
-                u.setScale('x', { min: 0, max: u.data[0].length - 1 });
+                clearZoom(u);
                 btn.style.display = 'none';
             };
             u.root.style.position = 'relative';
@@ -74,26 +95,37 @@ var CMCharts = (function() {
                 }],
                 ready: [function(u) {
                     u.over.addEventListener('dblclick', function() {
-                        u._zoomRange = null;
-                        u.setScale('x', { min: 0, max: u.data[0].length - 1 });
+                        clearZoom(u);
                         hideResetBtn(u);
                     });
+                    // A zoomed refetch builds a chart whose x-domain IS the zoom
+                    // window, so no setScale follows to raise the button.
+                    if (isZoomed(u)) showResetBtn(u);
                 }],
                 setSelect: [function(u) {
                     var min = u.posToVal(u.select.left, 'x');
                     var max = u.posToVal(u.select.left + u.select.width, 'x');
                     if (max - min > 1) {
+                        // Zoom the current render straight away for instant feedback;
+                        // the refetch of the same window then replaces it.
                         u._zoomRange = { min: min, max: max };
                         setYZoom(u, min, max);
                         u.setScale('x', u._zoomRange);
                         showResetBtn(u);
+                        if (timestamps && timestamps.length > 1 &&
+                            typeof window.cmSetZoomWindow === 'function') {
+                            // Third arg: the right edge is on (or within one sample
+                            // of) the newest sample the chart holds.
+                            window.cmSetZoomWindow(indexToTime(min), indexToTime(max),
+                                max >= timestamps.length - 2);
+                        }
                     }
                     u.setSelect({ left: 0, width: 0, top: 0, height: 0 }, false);
                 }],
                 // Covers the restored zoom of a re-rendered chart, where the
                 // reset button would otherwise be gone with the old instance.
                 setScale: [function(u) {
-                    if (u._zoomRange) showResetBtn(u);
+                    if (isZoomed(u)) showResetBtn(u);
                     else hideResetBtn(u);
                 }]
             }
@@ -256,7 +288,7 @@ var CMCharts = (function() {
                 if (val == null) return '';
                 return ctx.dataset.label + ': ' + val.toFixed(1) + ' ms';
             },
-            plugins: [lossMarkersPlugin(lossIndices), zoomPlugin()].concat(bandPlugins)
+            plugins: [lossMarkersPlugin(lossIndices), zoomPlugin(timestamps)].concat(bandPlugins)
         });
     }
 
