@@ -307,7 +307,10 @@
                 CMCharts.renderStatsCards('cm-stats-cards', allTargetData);
                 CMCharts.renderPerTargetStats('cm-per-target-stats', allTargetData);
                 var chartRange = pinnedDayView ? 86400 : currentRange;
-                CMCharts.renderCombinedChart('cm-combined-chart', allTargetData, chartRange);
+                // A pinned day shares the 1d range but is fetched at raw resolution, so
+                // fold its date into the x-domain key to keep the zoom windows separate
+                var chartDomainKey = pinnedDayView ? '86400s@' + pinnedDayView.date : null;
+                CMCharts.renderCombinedChart('cm-combined-chart', allTargetData, chartRange, chartDomainKey);
                 CMCharts.renderAvailabilityBand('cm-availability', allTargetData);
                 renderOutages(allOutageData);
                 renderExportLinks();

@@ -757,6 +757,14 @@ function openChartZoom(canvasId) {
     var src = charts[canvasId];
     if (!src || !src._docsightParams) return;
     var params = src._docsightParams;
+    // Carry the source chart's legend visibility into the modal — the datasets
+    // it was built from do not know about the user's legend toggles
+    var srcShow = {};
+    if (src.series) {
+        for (var ssi = 1; ssi < src.series.length; ssi++) {
+            srcShow[src.series[ssi].label] = src.series[ssi].show;
+        }
+    }
     var srcEl = document.getElementById(canvasId);
     var card = srcEl ? srcEl.closest('.chart-card') : null;
     var label = card ? card.querySelector('.chart-label') : null;
@@ -796,13 +804,18 @@ function openChartZoom(canvasId) {
         params.datasets.forEach(function(ds) {
             var zoomShowPoints = ds.showPoints;
             if (zoomShowPoints === undefined) zoomShowPoints = n <= 30 && !isBar;
+            var zoomShow = ds.show;
+            if (zoomShow === undefined) {
+                zoomShow = Object.prototype.hasOwnProperty.call(srcShow, ds.label) ? srcShow[ds.label] : true;
+            }
             var s = {
                 label: ds.label,
                 stroke: ds.color || 'rgba(168,85,247,0.9)',
                 width: ds.lineWidth !== undefined ? ds.lineWidth : (isBar ? 0 : 2),
                 fill: isBar ? (ds.color || '#a855f7') + 'cc' : (ds.fill || undefined),
                 points: { show: zoomShowPoints, size: isBar ? 0 : (ds.pointSize || (n > 30 ? 4 : 8)) },
-                spanGaps: ds.spanGaps !== undefined ? ds.spanGaps : false
+                spanGaps: ds.spanGaps !== undefined ? ds.spanGaps : false,
+                show: zoomShow
             };
             if (ds.fillTo !== undefined && ds.fillTo !== null) s.fillTo = ds.fillTo;
             if (isBar) { s.paths = barPaths; s.points = { show: false }; }

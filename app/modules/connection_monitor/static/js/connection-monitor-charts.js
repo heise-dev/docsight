@@ -149,8 +149,10 @@ var CMCharts = (function() {
      * @param {string} containerId - DOM element ID
      * @param {Array} allTargetData - [{target: {id, label, host}, samples: [...]}]
      * @param {number|string} range - Selected range in seconds or a normalized range key.
+     * @param {string} [domainKey] - Optional x-domain identity for the zoom binding;
+     *   defaults to the normalized range.
      */
-    function renderCombinedChart(containerId, allTargetData, range) {
+    function renderCombinedChart(containerId, allTargetData, range, domainKey) {
         if (!allTargetData || allTargetData.length === 0) return;
 
         // Build unified timeline from all targets' samples
@@ -245,7 +247,7 @@ var CMCharts = (function() {
         renderChart(containerId, labels, datasets, 'line', zones, {
             yMin: 0,
             zoomable: true,
-            xDomainKey: axisRange,
+            xDomainKey: domainKey !== undefined && domainKey !== null ? domainKey : axisRange,
             minHeight: 260,
             maxHeight: 440,
             heightRatio: 0.42,
