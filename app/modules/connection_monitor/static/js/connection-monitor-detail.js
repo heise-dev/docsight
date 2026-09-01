@@ -30,6 +30,17 @@
         }, interval);
     }
 
+    // A user-initiated refetch (zoom, reset, range or pinned-day switch) keeps the
+    // old chart on screen until three requests per target resolve, which on a long
+    // range looks stuck. Background polls never show it — a periodic refresh must
+    // not flash the UI.
+    function setChartLoading(busy) {
+        var mount = document.getElementById('cm-combined-chart');
+        var overlay = document.getElementById('cm-chart-loading');
+        if (mount) mount.setAttribute('aria-busy', busy ? 'true' : 'false');
+        if (overlay) overlay.hidden = !busy;
+    }
+
     function getMaxPointsForRange(seconds) {
         return seconds >= 86400 ? 1440 : 0;
     }
@@ -43,7 +54,7 @@
         });
         btn.classList.add('active');
         updatePinButton();
-        loadData();
+        loadData(true);
         updateRefreshInterval();
     };
 
@@ -70,14 +81,14 @@
         var followLive = !!atLastSample && !pinnedDayView &&
             (Date.now() / 1000) - end <= Math.max(end - start, 60);
         zoomWindow = { start: start, end: end, span: end - start, followLive: followLive };
-        loadData();
+        loadData(true);
         updateRefreshInterval();
     };
 
     window.cmClearZoomWindow = function() {
         if (!zoomWindow) return;
         zoomWindow = null;
-        loadData();
+        loadData(true);
         updateRefreshInterval();
     };
 
@@ -204,7 +215,7 @@
                                 b.classList.toggle('active', Number(b.dataset.cmRange) === currentRange);
                             });
                             updatePinButton();
-                            loadData();
+                            loadData(true);
                             updateRefreshInterval();
                         }
                         loadPinnedDays();
@@ -234,7 +245,7 @@
 
         if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
 
-        loadData();
+        loadData(true);
         loadPinnedDays(); // refresh to highlight active
     }
 
@@ -299,10 +310,11 @@
             .catch(function() {});
     }
 
-    function loadData() {
+    function loadData(userInitiated) {
         if (targets.length === 0) { showNoData(); return; }
 
         var seq = ++loadSeq;
+        if (userInitiated) setChartLoading(true);
         var now = Date.now() / 1000;
         var start, end;
         if (zoomWindow) {
@@ -372,12 +384,14 @@
                 if (!hasSamples) {
                     if (zoomWindow) {
                         // Nothing stored in the zoomed window — drop back to the
-                        // parent range instead of leaving a blank chart behind
+                        // parent range instead of leaving a blank chart behind.
+                        // The follow-up load keeps the loading state up.
                         zoomWindow = null;
-                        loadData();
+                        loadData(userInitiated);
                         updateRefreshInterval();
                         return;
                     }
+                    setChartLoading(false);
                     showNoData();
                     return;
                 }
@@ -404,8 +418,14 @@
                 renderExportLinks();
                 renderRawLogLinks();
                 renderResolutionIndicator(meta);
+                setChartLoading(false);
             })
-            .catch(function() {});
+            .catch(function() {
+                // Only the current batch clears the state: an overtaken response
+                // must not uncover a newer pending one, and a failed fetch must
+                // not leave the spinner up forever.
+                if (seq === loadSeq) setChartLoading(false);
+            });
     }
 
     function renderExportLinks() {
