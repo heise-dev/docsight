@@ -606,3 +606,47 @@ def test_connection_monitor_reset_zoom_restores_the_rolling_window(demo_page):
     reset_again = state["requests"][-1]
     assert abs((reset_again["end"] - reset_again["start"]) - 604800) <= 5, "dblclick should restore the 7d window"
     expect(page.locator("#cm-combined-chart button", has_text="Reset Zoom")).to_have_count(0)
+
+
+def test_connection_monitor_user_refetch_shows_a_loading_state_but_a_poll_does_not(demo_page):
+    """A user-triggered refetch must be visibly loading; a background poll must not flash."""
+    page = demo_page
+    state = {}
+    _stub_connection_monitor_api(page, state=state)
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+
+    _rezoom_cm_chart(page, 60, 120)
+    overlay = page.locator("#cm-chart-loading")
+    mount = page.locator("#cm-combined-chart")
+    expect(overlay).to_be_hidden()
+
+    # Reset Zoom refetches the whole range — three requests per target, which is
+    # slow enough on a long range to look stuck without any feedback
+    _hold_next_cm_samples_response(page, 3000)
+    page.locator("#cm-combined-chart button", has_text="Reset Zoom").click()
+    expect(overlay).to_be_visible()
+    expect(mount).to_have_attribute("aria-busy", "true")
+
+    # ...and it clears again once that batch has actually rendered
+    expect(overlay).to_be_hidden(timeout=15000)
+    expect(mount).to_have_attribute("aria-busy", "false")
+
+    # The 10s poll must leave the chart alone, even while its response is held back
+    page.evaluate(
+        """() => {
+            window._cmLoadingShown = 0;
+            const el = document.getElementById('cm-chart-loading');
+            new MutationObserver(() => { if (!el.hidden) window._cmLoadingShown++; })
+                .observe(el, { attributes: true, attributeFilter: ['hidden'] });
+        }"""
+    )
+    _hold_next_cm_samples_response(page, 2000)
+    page.evaluate("() => { window.charts['cm-combined-chart']._e2eStale = true; }")
+    page.wait_for_function(
+        "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._e2eStale",
+        timeout=25000,
+    )
+    assert page.evaluate("() => window._cmLoadingShown") == 0, (
+        "a background poll must not flash the loading state"
+    )

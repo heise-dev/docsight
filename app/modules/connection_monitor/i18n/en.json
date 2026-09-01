@@ -35,6 +35,7 @@
   "cm_detail_title": "Connection Monitor",
   "cm_timerange": "Time range",
   "cm_latency_chart": "Latency",
+  "cm_chart_loading": "Loading…",
   "cm_loss_chart": "Packet Loss",
   "cm_availability_chart": "Availability",
   "cm_outage_log": "Outage Log",

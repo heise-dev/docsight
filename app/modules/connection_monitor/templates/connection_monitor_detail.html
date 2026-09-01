@@ -71,6 +71,10 @@
                 ></div>
             </div>
             <div id="cm-combined-chart" class="cm-chart-mount"></div>
+            <div id="cm-chart-loading" class="cm-chart-loading" role="status" hidden>
+                <div class="spinner"></div>
+                <span>{{ t.get('docsight.connection_monitor.cm_chart_loading', 'Loading…') }}</span>
+            </div>
         </section>
 
         <aside class="cm-side-stack">
