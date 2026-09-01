@@ -691,6 +691,32 @@ class TestExportAPI:
         assert "connection_monitor_Mein_Zähler.csv" in csv_resp.headers["Content-Disposition"]
         assert "connection_monitor_Mein_Z_hler_raw_ping.log" in pinglog_resp.headers["Content-Disposition"]
 
+    @pytest.mark.parametrize("label,csv_name,pinglog_name", [
+        ('Ziel "A"', "Ziel__A_", "Ziel_A"),
+        ("Ziel;A", "Ziel_A", "Ziel_A"),
+        ("Ziel\\A", "Ziel_A", "Ziel_A"),
+        ("Ziel\r\nX-Injected: 1", "Ziel__X-Injected:_1", "Ziel_X-Injected_1"),
+        ("Pfeil → B", "Pfeil___B", "Pfeil_B"),
+        ("Ziel \U0001F600", "Ziel__", "Ziel"),
+    ])
+    def test_export_filenames_stay_header_safe(self, client, label, csv_name, pinglog_name):
+        c, storage = client
+        tid = storage.create_target(label, "192.0.2.1")
+
+        csv_resp = c.get(f"/api/connection-monitor/export/{tid}")
+        pinglog_resp = c.get(f"/api/connection-monitor/export/{tid}?format=pinglog")
+
+        assert csv_resp.status_code == 200
+        assert pinglog_resp.status_code == 200
+        assert csv_resp.headers["Content-Disposition"] == \
+            f"attachment; filename=connection_monitor_{csv_name}.csv"
+        assert pinglog_resp.headers["Content-Disposition"] == \
+            f"attachment; filename=connection_monitor_{pinglog_name}_raw_ping.log"
+        for resp in (csv_resp, pinglog_resp):
+            filename = resp.headers["Content-Disposition"].split("filename=", 1)[1]
+            assert not set(filename) & set('";\\\r\n')
+            filename.encode("latin-1")
+
     def test_export_rejects_unknown_format(self, client):
         c, storage = client
         tid = storage.create_target("Cloudflare", "1.1.1.1")

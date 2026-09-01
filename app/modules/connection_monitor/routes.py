@@ -487,9 +487,18 @@ def api_get_outages(target_id):
 # --- Export ---
 
 
+# Characters that cannot safely appear in a Content-Disposition filename
+# parameter: control characters (header injection), the quote/backslash/
+# semicolon that terminate the parameter, and anything the latin-1 header
+# encoding required by WSGI cannot represent.
+_HEADER_UNSAFE_RE = re.compile(r"[^\x20-\x7e\xa0-\xff]|[\"\\;]")
+
+
 def _csv_export_label(target: dict | None, target_id: int) -> str:
     """Return the legacy CSV export label for backward-compatible filenames."""
-    return target["label"].replace(" ", "_") if target else str(target_id)
+    if not target:
+        return str(target_id)
+    return _HEADER_UNSAFE_RE.sub("_", target["label"].replace(" ", "_"))
 
 
 def _safe_export_label(target: dict | None, target_id: int) -> str:
