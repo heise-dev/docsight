@@ -35,7 +35,8 @@ var CMCharts = (function() {
             if (stored) {
                 if (stored.loss === false) state.loss = false;
                 if (stored.clip === true) state.clip = true;
-                if (stored.targets) {
+                if (typeof stored.targets === 'object' && stored.targets !== null &&
+                    !Array.isArray(stored.targets)) {
                     Object.keys(stored.targets).forEach(function(id) {
                         var t = stored.targets[id];
                         if (!t) return;
@@ -81,13 +82,15 @@ var CMCharts = (function() {
             lastRenderArgs.range, lastRenderArgs.domainKey);
     }
 
-    function controlButton(text, toggle, targetId) {
+    function controlButton(text, toggle, targetId, targetName) {
         var btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'cm-chart-toggle';
         btn.dataset.toggle = toggle;
         if (targetId != null) btn.dataset.target = String(targetId);
         btn.textContent = text;
+        // The visible text is just "line"/"band"; screen readers need the target too
+        if (targetName) btn.setAttribute('aria-label', targetName + ' ' + text);
         btn.onclick = function() { toggleControl(toggle, targetId); };
         return btn;
     }
@@ -117,8 +120,9 @@ var CMCharts = (function() {
                 hostSpan.textContent = '(' + row.host + ')';
                 line.appendChild(hostSpan);
             }
-            line.appendChild(controlButton(lLine, 'line', row.id));
-            var band = controlButton(lBand, 'band', row.id);
+            var targetName = row.label + (row.host ? ' (' + row.host + ')' : '');
+            line.appendChild(controlButton(lLine, 'line', row.id, targetName));
+            var band = controlButton(lBand, 'band', row.id, targetName);
             if (!row.hasBand) {
                 // Disabled rather than hidden, so the row layout does not jump per range
                 band.disabled = true;
@@ -143,7 +147,7 @@ var CMCharts = (function() {
             var on;
             if (toggle === 'loss') on = controls.loss;
             else if (toggle === 'clip') on = controls.clip;
-            else on = targetControls(btn.dataset.target)[toggle];
+            else on = !btn.disabled && targetControls(btn.dataset.target)[toggle];
             btn.setAttribute('aria-pressed', on ? 'true' : 'false');
         }
     }
@@ -157,7 +161,9 @@ var CMCharts = (function() {
     function renderControlsStrip(rows) {
         var container = document.getElementById(CONTROLS_ID);
         if (!container) return;
-        var signature = rows.map(function(r) { return r.id + ':' + (r.hasBand ? 1 : 0); }).join('|');
+        var signature = rows.map(function(r) {
+            return r.id + ':' + (r.hasBand ? 1 : 0) + ':' + r.label + '@' + (r.host || '');
+        }).join('|');
         if (container._cmSignature !== signature) {
             buildControlsStrip(container, rows);
             container._cmSignature = signature;
@@ -291,10 +297,15 @@ var CMCharts = (function() {
     /**
      * uPlot plugin: draw red vertical lines at packet loss indices.
      * Uses 'draw' hook so lines render ON TOP of series (like PingPlotter).
+     * `_cmLossMarkers` reports the controls-strip toggle, so a switched-off marker
+     * layer stays distinguishable from a window that simply carries no loss.
      */
-    function lossMarkersPlugin(lossIndices) {
-        if (!lossIndices || lossIndices.length === 0) return {};
+    function lossMarkersPlugin(lossIndices, enabled) {
+        if (!enabled || !lossIndices || lossIndices.length === 0) {
+            return { _cmLossMarkers: !!enabled };
+        }
         return {
+            _cmLossMarkers: true,
             hooks: {
                 draw: [function(u) {
                     var ctx = u.ctx;
@@ -480,7 +491,9 @@ var CMCharts = (function() {
         shownLines.forEach(function(arr) {
             arr.forEach(function(v) {
                 if (v == null) return;
-                lineSamples.push(v);
+                // Only the clip ceiling needs the individual samples, so skip collecting
+                // (and sorting) them on every poll while clipping is switched off
+                if (controls.clip) lineSamples.push(v);
                 if (v > dataMax) dataMax = v;
             });
         });
@@ -501,11 +514,12 @@ var CMCharts = (function() {
         else if (ceiling <= 100) yMax = Math.ceil(ceiling * 1.2);
         else yMax = Math.ceil(ceiling * 1.15);
 
-        // Samples the clipped ceiling cuts off get a hint marker at the top edge
+        // Every visible sample the clipped ceiling cuts off gets a hint marker at the
+        // top edge - the band envelope included, since it is clipped by the same ceiling
         var clipIndices = [];
         if (ceiling < dataMax) {
             var clipSet = {};
-            shownLines.forEach(function(arr) {
+            shownLines.concat(shownBandMax).forEach(function(arr) {
                 for (var ci = 0; ci < arr.length; ci++) {
                     if (arr[ci] != null && arr[ci] > yMax) clipSet[ci] = true;
                 }
@@ -546,7 +560,7 @@ var CMCharts = (function() {
                 }
                 return text;
             },
-            plugins: [lossMarkersPlugin(controls.loss ? lossIndices : []),
+            plugins: [lossMarkersPlugin(lossIndices, controls.loss),
                 clipHintsPlugin(clipIndices), zoomPlugin(timestamps)].concat(bandPlugins)
         });
     }

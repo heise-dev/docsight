@@ -250,7 +250,7 @@ def _cm_chart_flags(page):
             const u = window.charts['cm-combined-chart'];
             const plugins = u._docsightParams.opts.plugins;
             return {
-                lossMarkers: !!(plugins[0] && plugins[0].hooks),
+                lossMarkers: !!(plugins[0] && plugins[0]._cmLossMarkers),
                 clipHints: u._cmClipHints || 0,
                 yMaxStrict: !!u._docsightParams.opts.yMaxStrict,
             };
@@ -458,6 +458,11 @@ def test_connection_monitor_band_toggle_drops_the_envelope_and_the_y_ceiling(dem
 
     _cm_toggle(page, "#cm-chart-controls [data-toggle='band']")
     assert _cm_scales(page)["yMax"] == with_band["yMax"], "switching the band back restores the ceiling"
+
+    # A clipped ceiling cuts the envelope too, so the band must be hinted as well
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='clip']")
+    assert _cm_scales(page)["yMax"] < 100, "the band max must not survive the clipped ceiling"
+    assert _cm_chart_flags(page)["clipHints"] > 0, "a clipped band envelope must be hinted too"
 
 
 def test_connection_monitor_loss_marker_toggle_removes_the_markers(demo_page):

@@ -386,6 +386,8 @@
 }
 
 .cm-chart-toggle {
+    /* 24px keeps the toggle at the WCAG 2.2 SC 2.5.8 minimum target size */
+    min-height: 24px;
     padding: 2px 7px;
     border: 1px solid var(--cm-panel-border);
     border-radius: 4px;
