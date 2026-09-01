@@ -84,7 +84,8 @@ def _requested_window(url):
 
 
 def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned_days=None,
-                                 state=None, interval=60, meta=None, target_metas=None):
+                                 state=None, interval=60, meta=None, target_metas=None,
+                                 band_max=None, loss_index=None):
     """Serve deterministic Connection Monitor data: one target, one latency outlier.
 
     Samples are served only inside the requested window, so a fetch that narrows
@@ -93,19 +94,25 @@ def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned
     closer than a minute apart. ``meta`` chooses the tiers the samples
     envelope reports - a dict, or a callable taking the request URL when the
     answer depends on the resolution asked for. ``target_metas`` instead serves
-    one target per entry, each with its own envelope meta.
+    one target per entry, each with its own envelope meta. ``band_max`` adds
+    per-bucket min/max so the chart draws a min/max band, and ``loss_index``
+    marks one sample as fully lost so the loss markers are drawn.
     """
     now = int(time.time())
     samples = [
         {
             "timestamp": now - (sample_count - i) * interval,
             "latency_ms": 1000.0 if i == outlier_index else 50.0 + (i % 5),
-            "packet_loss_pct": 0,
+            "packet_loss_pct": 100 if i == loss_index else 0,
             "sample_count": 1,
-            "timeout_count": 0,
+            "timeout_count": 1 if i == loss_index else 0,
         }
         for i in range(sample_count)
     ]
+    if band_max is not None:
+        for sample in samples:
+            sample["min_latency_ms"] = sample["latency_ms"] - 5.0
+            sample["max_latency_ms"] = float(band_max)
     if state is not None:
         state["timestamps"] = [s["timestamp"] for s in samples]
         state["requests"] = []
@@ -228,6 +235,38 @@ def _cm_x_axis_labels(page):
     )
 
 
+def _cm_series(page):
+    """Label and visibility of every series the combined chart holds."""
+    return page.evaluate(
+        """() => window.charts['cm-combined-chart'].series.slice(1).map(
+            (s) => ({label: s.label, show: !!s.show}))"""
+    )
+
+
+def _cm_chart_flags(page):
+    """Which optional chart-controls features the live instance was built with."""
+    return page.evaluate(
+        """() => {
+            const u = window.charts['cm-combined-chart'];
+            const plugins = u._docsightParams.opts.plugins;
+            return {
+                lossMarkers: !!(plugins[0] && plugins[0].hooks),
+                clipHints: u._cmClipHints || 0,
+                yMaxStrict: !!u._docsightParams.opts.yMaxStrict,
+            };
+        }"""
+    )
+
+
+def _cm_toggle(page, selector):
+    """Click a controls-strip toggle and wait for the re-render it triggers."""
+    page.evaluate("() => { window.charts['cm-combined-chart']._e2eStale = true; }")
+    page.locator(selector).click()
+    page.wait_for_function(
+        "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._e2eStale"
+    )
+
+
 def _cm_scales(page):
     return page.evaluate(
         """() => {
@@ -320,55 +359,181 @@ def test_connection_monitor_zoomed_refetch_rescales_y_and_keeps_the_reset_button
     expect(page.locator("#cm-combined-chart button", has_text="Reset Zoom")).to_be_visible()
 
 
+def test_connection_monitor_controls_strip_replaces_the_builtin_legend(demo_page):
+    """The strip lists one row per target; the internal band helpers never surface."""
+    page = demo_page
+    metas = [{"resolution": "raw"} for _ in range(4)]
+    _stub_connection_monitor_api(page, outlier_index=-1, band_max=400, target_metas=metas)
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+
+    expect(page.locator("#cm-combined-chart .u-legend")).to_have_count(0)
+    target_rows = page.locator(
+        "#cm-chart-controls .cm-chart-control-row:not(.cm-chart-control-globals)"
+    )
+    expect(target_rows).to_have_count(4)
+    expect(page.locator("#cm-chart-controls .cm-chart-control-globals .cm-chart-toggle")).to_have_count(2)
+    expect(page.locator("#cm-chart-controls [data-toggle='line']")).to_have_count(4)
+    expect(page.locator("#cm-chart-controls [data-toggle='band']")).to_have_count(4)
+
+    labels = [s["label"] for s in _cm_series(page)]
+    assert not [label for label in labels if label.startswith(("_min_", "_max_"))], (
+        f"internal band helper names must be gone: {labels}"
+    )
+    assert "Router 1 (192.168.1.1) max" in labels, f"band helpers follow their target: {labels}"
+
+
 def test_connection_monitor_hidden_source_survives_data_refresh(demo_page):
-    """Hiding a source via the chart legend must persist across the live data refresh."""
+    """Hiding a source via the controls strip must persist across the live data refresh."""
     page = demo_page
     page.evaluate("switchView('connection-monitor')")
     page.wait_for_selector("#view-connection-monitor.active", state="visible")
-    page.wait_for_selector("#cm-combined-chart .u-legend tr.u-series", state="visible")
+    page.wait_for_selector("#cm-chart-controls [data-toggle='line']", state="visible")
 
-    legend_rows = page.locator("#cm-combined-chart .u-legend tr.u-series")
-    assert legend_rows.count() >= 2, "combined chart should plot at least two monitored targets"
-    hidden_row = legend_rows.nth(1)
-    hidden_label = hidden_row.inner_text().strip()
+    line_toggles = page.locator("#cm-chart-controls [data-toggle='line']")
+    assert line_toggles.count() >= 2, "combined chart should plot at least two monitored targets"
+    hidden_label = _cm_series(page)[1]["label"]
 
-    hidden_row.locator("th").click()
-    expect(hidden_row).to_have_class("u-series u-off")
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='line'] >> nth=1")
+    expect(line_toggles.nth(1)).to_have_attribute("aria-pressed", "false")
 
     # Mark the live instance so we can wait for the refresh to rebuild the chart
     page.evaluate("charts['cm-combined-chart']._e2eStale = true")
     page.locator("#view-connection-monitor [data-cm-range='3600']").click()
     page.wait_for_function("() => charts['cm-combined-chart'] && !charts['cm-combined-chart']._e2eStale")
 
-    refreshed_rows = page.locator("#cm-combined-chart .u-legend tr.u-series")
-    expect(refreshed_rows.nth(1)).to_have_text(hidden_label)
-    expect(refreshed_rows.nth(1)).to_have_class("u-series u-off")
-    expect(refreshed_rows.nth(0)).to_have_class("u-series")
+    refreshed = _cm_series(page)
+    assert refreshed[1]["label"] == hidden_label
+    assert refreshed[1]["show"] is False, "the hidden source must stay hidden across the refresh"
+    assert refreshed[0]["show"] is True, "the other sources must stay visible"
+    expect(line_toggles.nth(1)).to_have_attribute("aria-pressed", "false")
 
 
 def test_connection_monitor_hidden_source_stays_hidden_in_zoom_modal(demo_page):
-    """A source hidden via the chart legend must stay hidden in the fullscreen zoom modal."""
+    """A source hidden via the controls strip must stay hidden in the fullscreen zoom modal."""
     page = demo_page
     page.evaluate("switchView('connection-monitor')")
     page.wait_for_selector("#view-connection-monitor.active", state="visible")
-    page.wait_for_selector("#cm-combined-chart .u-legend tr.u-series", state="visible")
+    page.wait_for_selector("#cm-chart-controls [data-toggle='line']", state="visible")
 
-    legend_rows = page.locator("#cm-combined-chart .u-legend tr.u-series")
-    assert legend_rows.count() >= 2, "combined chart should plot at least two monitored targets"
-    hidden_row = legend_rows.nth(1)
-    hidden_label = hidden_row.inner_text().strip()
+    line_toggles = page.locator("#cm-chart-controls [data-toggle='line']")
+    assert line_toggles.count() >= 2, "combined chart should plot at least two monitored targets"
+    hidden_label = _cm_series(page)[1]["label"]
 
-    hidden_row.locator("th").click()
-    expect(hidden_row).to_have_class("u-series u-off")
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='line'] >> nth=1")
+    expect(line_toggles.nth(1)).to_have_attribute("aria-pressed", "false")
 
     page.evaluate("openChartZoom('cm-combined-chart')")
-    page.wait_for_selector("#chart-zoom-canvas .u-legend tr.u-series", state="visible")
+    page.wait_for_function("() => window.zoomChart && window.zoomChart.series.length > 2")
 
-    zoom_rows = page.locator("#chart-zoom-canvas .u-legend tr.u-series")
-    expect(zoom_rows.nth(1)).to_have_text(hidden_label)
-    expect(zoom_rows.nth(1)).to_have_class("u-series u-off")
-    expect(zoom_rows.nth(0)).to_have_class("u-series")
+    zoom_series = page.evaluate(
+        """() => window.zoomChart.series.slice(1).map((s) => ({label: s.label, show: !!s.show}))"""
+    )
+    assert zoom_series[1]["label"] == hidden_label
+    assert zoom_series[1]["show"] is False, "the modal must inherit the hidden source"
+    assert zoom_series[0]["show"] is True
     page.evaluate("closeChartZoom()")
+
+
+def test_connection_monitor_band_toggle_drops_the_envelope_and_the_y_ceiling(demo_page):
+    """Switching a band off removes its helper series and the ceiling they held."""
+    page = demo_page
+    _stub_connection_monitor_api(page, outlier_index=-1, band_max=400)
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+
+    with_band = _cm_scales(page)
+    assert with_band["yMax"] > 400, "the band max should still drive the ceiling while it is shown"
+    assert len(_cm_series(page)) == 3, "line plus the two band helpers"
+    tooltip = page.evaluate(
+        """() => window.charts['cm-combined-chart']._docsightParams.opts.tooltipLabelCallback(
+            {parsed: {y: 50.0}, dataset: {label: 'Router (192.168.1.1)'}, dataIndex: 10})"""
+    )
+    assert "min 45.0" in tooltip and "max 400.0" in tooltip, tooltip
+
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='band']")
+    without_band = _cm_scales(page)
+    assert len(_cm_series(page)) == 1, "the helper series must not be pushed at all"
+    assert without_band["yMax"] < 100, "the ceiling must follow the visible line, not the band"
+
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='band']")
+    assert _cm_scales(page)["yMax"] == with_band["yMax"], "switching the band back restores the ceiling"
+
+
+def test_connection_monitor_loss_marker_toggle_removes_the_markers(demo_page):
+    """The packet-loss markers must be switchable off and stay off across a reload."""
+    page = demo_page
+    _stub_connection_monitor_api(page, loss_index=7)
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+
+    assert _cm_chart_flags(page)["lossMarkers"] is True, "loss markers are on by default"
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='loss']")
+    assert _cm_chart_flags(page)["lossMarkers"] is False
+
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+    assert _cm_chart_flags(page)["lossMarkers"] is False, "the loss toggle must survive a reload"
+    expect(page.locator("#cm-chart-controls [data-toggle='loss']")).to_have_attribute(
+        "aria-pressed", "false"
+    )
+
+
+def test_connection_monitor_clip_spikes_caps_the_axis_and_marks_the_clipped_samples(demo_page):
+    """Clipping pins the ceiling near the baseline and hints at every cut-off sample."""
+    page = demo_page
+    _stub_connection_monitor_api(page)
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+
+    full = _cm_scales(page)
+    assert full["yMax"] > 900, "the unclipped ceiling still covers the 1000 ms outlier"
+    assert _cm_chart_flags(page)["clipHints"] == 0
+
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='clip']")
+    clipped = _cm_scales(page)
+    assert clipped["yMax"] < 200, "the ceiling must drop to the 99th percentile of the visible line"
+    assert clipped["yMax"] >= 54, "the ceiling must still cover the baseline samples"
+    flags = _cm_chart_flags(page)
+    assert flags["yMaxStrict"] is True, "the engine must not widen back to the clipped outlier"
+    assert flags["clipHints"] == 1, "the clipped outlier must be hinted at the top edge"
+
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='clip']")
+    assert _cm_scales(page)["yMax"] == full["yMax"], "switching clipping off restores the full ceiling"
+
+
+def test_connection_monitor_chart_controls_persist_and_hold_the_zoom(demo_page):
+    """Toggles keep the zoom - both the instant window and the refetched one - and survive a reload."""
+    page = demo_page
+    sample_count = _stub_connection_monitor_api(page)
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 604800)
+
+    # Instant preview zoom: the refetch is held back, so _zoomRange is what must survive
+    _hold_next_cm_samples_response(page, 3000)
+    _zoom_cm_chart(page, sample_count // 2, sample_count - 1)
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='clip']")
+    preview = _cm_scales(page)
+    assert preview["zoom"] is not None, "a toggle must not drop the instant zoom window"
+    assert preview["xMin"] > 0, "the instant zoom window must still be applied"
+    page.wait_for_function(
+        "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._zoomRange"
+    )
+
+    # Refetched zoom window: the chart's x-domain IS the window, so it cannot be lost
+    zoomed = _cm_scales(page)
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='line']")
+    after = _cm_scales(page)
+    assert after["points"] == zoomed["points"], "a toggle must not refetch a wider window"
+    expect(page.locator("#cm-combined-chart button", has_text="Reset Zoom")).to_be_visible()
+
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+    reloaded = _cm_series(page)
+    assert reloaded[0]["show"] is False, "the hidden line must survive a page reload"
+    expect(page.locator("#cm-chart-controls [data-toggle='clip']")).to_have_attribute(
+        "aria-pressed", "true"
+    )
 
 
 def test_connection_monitor_pinned_day_does_not_share_zoom_with_live_1d(demo_page):

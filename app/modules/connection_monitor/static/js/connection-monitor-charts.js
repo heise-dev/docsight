@@ -16,6 +16,162 @@ var CMCharts = (function() {
         'rgba(251,113,133,0.9)'   // pink
     ];
 
+    var CONTROLS_ID = 'cm-chart-controls';
+    var CONTROLS_STORAGE_KEY = 'docsight-cm-chart-controls';
+    /* Clip the y ceiling to this percentile of the visible lines, but only when the
+       plain maximum sits more than CLIP_EXCESS above it - i.e. a real outlier. */
+    var CLIP_PERCENTILE = 0.99;
+    var CLIP_EXCESS = 1.25;
+
+    /* Controls strip state; the single source of truth for series visibility. */
+    var controls = loadControls();
+    /* Last renderCombinedChart() arguments, so a toggle can re-render without refetching. */
+    var lastRenderArgs = null;
+
+    function loadControls() {
+        var state = { loss: true, clip: false, targets: {} };
+        try {
+            var stored = JSON.parse(localStorage.getItem(CONTROLS_STORAGE_KEY));
+            if (stored) {
+                if (stored.loss === false) state.loss = false;
+                if (stored.clip === true) state.clip = true;
+                if (stored.targets) {
+                    Object.keys(stored.targets).forEach(function(id) {
+                        var t = stored.targets[id];
+                        if (!t) return;
+                        state.targets[id] = { line: t.line !== false, band: t.band !== false };
+                    });
+                }
+            }
+        } catch (err) {}
+        return state;
+    }
+
+    function saveControls() {
+        try {
+            localStorage.setItem(CONTROLS_STORAGE_KEY, JSON.stringify(controls));
+        } catch (err) {}
+    }
+
+    /* Unknown target ids fall back to the defaults (line and band both on). */
+    function targetControls(targetId) {
+        var key = String(targetId);
+        if (!controls.targets[key]) controls.targets[key] = { line: true, band: true };
+        return controls.targets[key];
+    }
+
+    function toggleControl(toggle, targetId) {
+        if (toggle === 'loss') controls.loss = !controls.loss;
+        else if (toggle === 'clip') controls.clip = !controls.clip;
+        else {
+            var t = targetControls(targetId);
+            t[toggle] = !t[toggle];
+        }
+        saveControls();
+        rerender();
+    }
+
+    /**
+     * Re-render the combined chart from the cached arguments. No refetch, and the
+     * xDomainKey is unchanged, so the engine carries the zoom across the rebuild.
+     */
+    function rerender() {
+        if (!lastRenderArgs) return;
+        renderCombinedChart(lastRenderArgs.containerId, lastRenderArgs.allTargetData,
+            lastRenderArgs.range, lastRenderArgs.domainKey);
+    }
+
+    function controlButton(text, toggle, targetId) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'cm-chart-toggle';
+        btn.dataset.toggle = toggle;
+        if (targetId != null) btn.dataset.target = String(targetId);
+        btn.textContent = text;
+        btn.onclick = function() { toggleControl(toggle, targetId); };
+        return btn;
+    }
+
+    function buildControlsStrip(container, rows) {
+        var lLine = container.dataset.lLine || 'line';
+        var lBand = container.dataset.lBand || 'band';
+        var lLoss = container.dataset.lLossMarkers || 'loss markers';
+        var lClip = container.dataset.lClipSpikes || 'clip spikes';
+        var lNoBand = container.dataset.lNoBand || 'No min/max values in this view';
+
+        container.textContent = '';
+        rows.forEach(function(row) {
+            var line = document.createElement('div');
+            line.className = 'cm-chart-control-row';
+            var dot = document.createElement('span');
+            dot.className = 'cm-target-dot';
+            dot.style.background = row.color;
+            line.appendChild(dot);
+            var name = document.createElement('span');
+            name.className = 'cm-chart-control-label';
+            name.textContent = row.label;
+            line.appendChild(name);
+            if (row.host) {
+                var hostSpan = document.createElement('span');
+                hostSpan.className = 'cm-target-host';
+                hostSpan.textContent = '(' + row.host + ')';
+                line.appendChild(hostSpan);
+            }
+            line.appendChild(controlButton(lLine, 'line', row.id));
+            var band = controlButton(lBand, 'band', row.id);
+            if (!row.hasBand) {
+                // Disabled rather than hidden, so the row layout does not jump per range
+                band.disabled = true;
+                band.title = lNoBand;
+            }
+            line.appendChild(band);
+            container.appendChild(line);
+        });
+
+        var globals = document.createElement('div');
+        globals.className = 'cm-chart-control-row cm-chart-control-globals';
+        globals.appendChild(controlButton(lLoss, 'loss', null));
+        globals.appendChild(controlButton(lClip, 'clip', null));
+        container.appendChild(globals);
+    }
+
+    function syncControlsStrip(container) {
+        var buttons = container.querySelectorAll('.cm-chart-toggle');
+        for (var i = 0; i < buttons.length; i++) {
+            var btn = buttons[i];
+            var toggle = btn.dataset.toggle;
+            var on;
+            if (toggle === 'loss') on = controls.loss;
+            else if (toggle === 'clip') on = controls.clip;
+            else on = targetControls(btn.dataset.target)[toggle];
+            btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+        }
+    }
+
+    /**
+     * Render the controls strip below the chart: one row per target plus the global
+     * toggles. The DOM is rebuilt only when the target signature changes, so the
+     * 10s refresh never steals focus from a button the user is on.
+     * @param {Array} rows - [{id, label, host, color, hasBand}]
+     */
+    function renderControlsStrip(rows) {
+        var container = document.getElementById(CONTROLS_ID);
+        if (!container) return;
+        var signature = rows.map(function(r) { return r.id + ':' + (r.hasBand ? 1 : 0); }).join('|');
+        if (container._cmSignature !== signature) {
+            buildControlsStrip(container, rows);
+            container._cmSignature = signature;
+        }
+        syncControlsStrip(container);
+    }
+
+    function percentileOf(values, p) {
+        var sorted = values.slice().sort(function(a, b) { return a - b; });
+        var idx = Math.floor(sorted.length * p);
+        if (idx >= sorted.length) idx = sorted.length - 1;
+        return sorted[idx];
+    }
+
     /**
      * uPlot plugin: drag-to-zoom on X-axis, double-click to reset.
      * Requires zoomable:true in renderChart opts (disables fixed x-scale range).
@@ -164,6 +320,40 @@ var CMCharts = (function() {
         };
     }
 
+    /**
+     * uPlot plugin: mark samples cut off by the "clip spikes" ceiling with a small
+     * triangle at the top edge, so a clipped outlier is never silently invisible.
+     */
+    function clipHintsPlugin(clipIndices) {
+        if (!clipIndices || clipIndices.length === 0) return {};
+        return {
+            hooks: {
+                draw: [function(u) {
+                    var ctx = u.ctx;
+                    var dpr = window.devicePixelRatio || 1;
+                    var size = 4 * dpr;
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
+                    ctx.clip();
+                    ctx.fillStyle = 'rgba(239,68,68,0.85)';
+                    for (var i = 0; i < clipIndices.length; i++) {
+                        var x = u.valToPos(clipIndices[i], 'x', true);
+                        if (x < u.bbox.left || x > u.bbox.left + u.bbox.width) continue;
+                        ctx.beginPath();
+                        ctx.moveTo(x, u.bbox.top + dpr);
+                        ctx.lineTo(x - size, u.bbox.top + size * 2);
+                        ctx.lineTo(x + size, u.bbox.top + size * 2);
+                        ctx.closePath();
+                        ctx.fill();
+                    }
+                    ctx.restore();
+                    u._cmClipHints = clipIndices.length;
+                }]
+            }
+        };
+    }
+
     function sampleCountOf(sample) {
         return sample && sample.sample_count ? sample.sample_count : 1;
     }
@@ -195,6 +385,10 @@ var CMCharts = (function() {
         var timestamps = Object.keys(timeMap).map(Number).sort(function(a, b) { return a - b; });
         if (timestamps.length === 0) return;
 
+        // Cached so a controls-strip toggle can re-render the same data (see rerender)
+        lastRenderArgs = { containerId: containerId, allTargetData: allTargetData,
+            range: range, domainKey: domainKey };
+
         // Build index lookup
         var tsIndex = {};
         for (var i = 0; i < timestamps.length; i++) tsIndex[timestamps[i]] = i;
@@ -212,6 +406,12 @@ var CMCharts = (function() {
         var datasets = [];
         var lossSet = {};
         var bandPlugins = [];
+        var controlRows = [];
+        // Only the series the controls strip actually shows drive the y ceiling
+        var shownLines = [];
+        var shownBandMax = [];
+        // Line label -> its min/max arrays, for the band values in the tooltip
+        var bandByLabel = {};
 
         allTargetData.forEach(function(td, tIdx) {
             var sampleMap = {};
@@ -237,35 +437,81 @@ var CMCharts = (function() {
                 }
             }
             var color = TARGET_COLORS[tIdx % TARGET_COLORS.length];
+            var shown = targetControls(td.target.id);
+            var label = td.target.label + (td.target.host ? ' (' + td.target.host + ')' : '');
+            controlRows.push({
+                id: td.target.id,
+                label: td.target.label,
+                host: td.target.host,
+                color: color,
+                hasBand: hasAggregated
+            });
+            // Explicit show: the strip, not the engine's carried-over legend map, decides
             datasets.push({
-                label: td.target.label + (td.target.host ? ' (' + td.target.host + ')' : ''),
+                label: label,
                 data: data,
                 color: color,
                 spanGaps: false,
-                dashed: hasAggregated ? true : undefined
+                dashed: hasAggregated ? true : undefined,
+                show: shown.line
             });
-            if (hasAggregated) {
-                datasets.push({ data: minData, color: 'transparent', label: '_min_' + tIdx, show: false });
-                datasets.push({ data: maxData, color: 'transparent', label: '_max_' + tIdx, show: false });
+            if (shown.line) shownLines.push(data);
+            // A switched-off band is not pushed at all, so it leaves the y ceiling,
+            // the tooltip, the zoom y scan and the zoom modal in one move.
+            if (hasAggregated && shown.band) {
+                datasets.push({ data: minData, color: 'transparent', label: label + ' min', show: false });
+                datasets.push({ data: maxData, color: 'transparent', label: label + ' max', show: false });
                 // uPlot series[0] is x-axis, so data indices are offset by +1
                 var bandColor = color.replace(/[\d.]+\)$/, '0.12)');
                 bandPlugins.push(bandPlugin(datasets.length - 1, datasets.length, bandColor));
+                bandByLabel[label] = { min: minData, max: maxData };
+                shownBandMax.push(maxData);
             }
         });
 
+        renderControlsStrip(controlRows);
+
         var lossIndices = Object.keys(lossSet).map(Number).sort(function(a, b) { return a - b; });
 
-        // Compute dynamic Y-max from actual data with headroom
+        // Compute dynamic Y-max from the visible data with headroom: a hidden line and
+        // the helpers of a switched-off band must not dictate the scale
         var dataMax = 0;
-        datasets.forEach(function(ds) {
-            ds.data.forEach(function(v) { if (v != null && v > dataMax) dataMax = v; });
+        var lineSamples = [];
+        shownLines.forEach(function(arr) {
+            arr.forEach(function(v) {
+                if (v == null) return;
+                lineSamples.push(v);
+                if (v > dataMax) dataMax = v;
+            });
         });
+        shownBandMax.forEach(function(arr) {
+            arr.forEach(function(v) { if (v != null && v > dataMax) dataMax = v; });
+        });
+        // "Clip spikes": pin the ceiling to the 99th percentile of the visible lines when
+        // a rare outlier dominates the scale, so the baseline stops being a flat line
+        var ceiling = dataMax;
+        if (controls.clip && lineSamples.length > 0) {
+            var p99 = percentileOf(lineSamples, CLIP_PERCENTILE);
+            if (p99 > 0 && dataMax > p99 * CLIP_EXCESS) ceiling = p99;
+        }
         // 40ms floor ensures green zone is always visible with breathing room.
         // Above 30ms: moderate headroom. Above 100ms: tighter headroom.
         var yMax;
-        if (dataMax <= 30) yMax = 40;
-        else if (dataMax <= 100) yMax = Math.ceil(dataMax * 1.2);
-        else yMax = Math.ceil(dataMax * 1.15);
+        if (ceiling <= 30) yMax = 40;
+        else if (ceiling <= 100) yMax = Math.ceil(ceiling * 1.2);
+        else yMax = Math.ceil(ceiling * 1.15);
+
+        // Samples the clipped ceiling cuts off get a hint marker at the top edge
+        var clipIndices = [];
+        if (ceiling < dataMax) {
+            var clipSet = {};
+            shownLines.forEach(function(arr) {
+                for (var ci = 0; ci < arr.length; ci++) {
+                    if (arr[ci] != null && arr[ci] > yMax) clipSet[ci] = true;
+                }
+            });
+            clipIndices = Object.keys(clipSet).map(Number).sort(function(a, b) { return a - b; });
+        }
 
         // PingPlotter-style threshold zones (vertically scaled backgrounds)
         // lineColor: transparent suppresses the dashed boundary lines
@@ -279,6 +525,9 @@ var CMCharts = (function() {
         renderChart(containerId, labels, datasets, 'line', zones, {
             yMin: 0,
             zoomable: true,
+            legend: false,
+            // Only a clipped ceiling may stay below the data; otherwise widen as before
+            yMaxStrict: ceiling < dataMax,
             xDomainKey: domainKey !== undefined && domainKey !== null ? domainKey : axisRange,
             minHeight: 260,
             maxHeight: 440,
@@ -286,9 +535,19 @@ var CMCharts = (function() {
             tooltipLabelCallback: function(ctx) {
                 var val = ctx.parsed.y;
                 if (val == null) return '';
-                return ctx.dataset.label + ': ' + val.toFixed(1) + ' ms';
+                var text = ctx.dataset.label + ': ' + val.toFixed(1) + ' ms';
+                var band = bandByLabel[ctx.dataset.label];
+                if (band) {
+                    var lo = band.min[ctx.dataIndex];
+                    var hi = band.max[ctx.dataIndex];
+                    if (lo != null && hi != null) {
+                        text += ' (min ' + lo.toFixed(1) + ' \u00b7 max ' + hi.toFixed(1) + ')';
+                    }
+                }
+                return text;
             },
-            plugins: [lossMarkersPlugin(lossIndices), zoomPlugin(timestamps)].concat(bandPlugins)
+            plugins: [lossMarkersPlugin(controls.loss ? lossIndices : []),
+                clipHintsPlugin(clipIndices), zoomPlugin(timestamps)].concat(bandPlugins)
         });
     }
 
@@ -655,6 +914,7 @@ var CMCharts = (function() {
 
     return {
         renderCombinedChart: renderCombinedChart,
+        rerender: rerender,
         renderAvailabilityBand: renderAvailabilityBand,
         renderStatsCards: renderStatsCards,
         renderPerTargetStats: renderPerTargetStats,
