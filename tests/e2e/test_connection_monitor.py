@@ -73,7 +73,7 @@ def test_connection_monitor_mobile_surfaces_raw_ping_log_without_deep_scroll(dem
     assert button_box["y"] + button_box["height"] <= 844, "raw log download actions should be fully visible without deep mobile scrolling"
 
 
-def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5):
+def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned_days=None):
     """Serve deterministic Connection Monitor data: one target, one latency outlier."""
     now = int(time.time())
     samples = [
@@ -89,7 +89,9 @@ def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5):
 
     def handler(route):
         url = route.request.url
-        if "/targets" in url:
+        if "/pinned-days" in url:
+            route.fulfill(json=pinned_days or [])
+        elif "/targets" in url:
             route.fulfill(json=[{"id": 1, "label": "Router", "host": "192.168.1.1", "enabled": True}])
         elif "/samples/" in url:
             route.fulfill(json={"meta": {"resolution": "raw"}, "samples": samples})
@@ -255,3 +257,35 @@ def test_connection_monitor_hidden_source_stays_hidden_in_zoom_modal(demo_page):
     expect(zoom_rows.nth(1)).to_have_class("u-series u-off")
     expect(zoom_rows.nth(0)).to_have_class("u-series")
     page.evaluate("closeChartZoom()")
+
+
+def test_connection_monitor_pinned_day_does_not_share_zoom_with_live_1d(demo_page):
+    """A pinned day and the live 1d range are different x-domains — zoom must not carry over."""
+    page = demo_page
+    now = int(time.time())
+    pinned = [{"date": "2026-08-31", "label": "", "utc_start": now - 86400, "utc_end": now}]
+    sample_count = _stub_connection_monitor_api(page, pinned_days=pinned)
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+
+    _zoom_cm_chart(page, sample_count // 2, sample_count - 1)
+    assert _cm_scales(page)["zoom"] is not None, "the live 1d view should be zoomed"
+
+    pinned_btn = page.locator("#cm-pinned-days .cm-chip-btn", has_text="2026-08-31")
+    page.evaluate("() => { window.charts['cm-combined-chart']._e2eStale = true; }")
+    pinned_btn.click()
+    page.wait_for_function(
+        "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._e2eStale"
+    )
+    expect(pinned_btn).to_have_attribute("aria-pressed", "true")
+
+    pinned_view = _cm_scales(page)
+    assert pinned_view["zoom"] is None, "the pinned day should not inherit the live 1d zoom"
+    assert pinned_view["xMin"] <= 0, "the pinned day should show its full x range"
+    assert pinned_view["xMax"] >= pinned_view["points"] - 1, "the pinned day should show its full x range"
+
+    # ...and back: a zoom taken on the pinned day must not leak into the live 1d view
+    _zoom_cm_chart(page, sample_count // 2, sample_count - 1)
+    assert _cm_scales(page)["zoom"] is not None, "the pinned day should be zoomed"
+    _reload_cm_range(page, 86400)
+    assert _cm_scales(page)["zoom"] is None, "the live 1d view should not inherit the pinned day zoom"
