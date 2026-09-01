@@ -230,3 +230,28 @@ def test_connection_monitor_hidden_source_survives_data_refresh(demo_page):
     expect(refreshed_rows.nth(1)).to_have_text(hidden_label)
     expect(refreshed_rows.nth(1)).to_have_class("u-series u-off")
     expect(refreshed_rows.nth(0)).to_have_class("u-series")
+
+
+def test_connection_monitor_hidden_source_stays_hidden_in_zoom_modal(demo_page):
+    """A source hidden via the chart legend must stay hidden in the fullscreen zoom modal."""
+    page = demo_page
+    page.evaluate("switchView('connection-monitor')")
+    page.wait_for_selector("#view-connection-monitor.active", state="visible")
+    page.wait_for_selector("#cm-combined-chart .u-legend tr.u-series", state="visible")
+
+    legend_rows = page.locator("#cm-combined-chart .u-legend tr.u-series")
+    assert legend_rows.count() >= 2, "combined chart should plot at least two monitored targets"
+    hidden_row = legend_rows.nth(1)
+    hidden_label = hidden_row.inner_text().strip()
+
+    hidden_row.locator("th").click()
+    expect(hidden_row).to_have_class("u-series u-off")
+
+    page.evaluate("openChartZoom('cm-combined-chart')")
+    page.wait_for_selector("#chart-zoom-canvas .u-legend tr.u-series", state="visible")
+
+    zoom_rows = page.locator("#chart-zoom-canvas .u-legend tr.u-series")
+    expect(zoom_rows.nth(1)).to_have_text(hidden_label)
+    expect(zoom_rows.nth(1)).to_have_class("u-series u-off")
+    expect(zoom_rows.nth(0)).to_have_class("u-series")
+    page.evaluate("closeChartZoom()")
