@@ -143,3 +143,25 @@ def test_event_export_stays_available_for_empty_filtered_feed(demo_page):
         "href",
         re.compile(r"/api/events/export\.csv\?.*severity=critical.*exclude_operational=true"),
     )
+
+
+def test_acknowledge_all_stays_visible_on_first_events_view_load(demo_page):
+    """The ack-all button must be offered as soon as unacknowledged events exist."""
+    page = demo_page
+    page.route(
+        re.compile(r".*/api/events\?.*"),
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=(
+                '{"events": [{"id": 1, "timestamp": "2026-01-01T00:00:00", '
+                '"event_type": "health_change", "severity": "warning", '
+                '"message": "test", "acknowledged": false}], '
+                '"unacknowledged_count": 3}'
+            ),
+        ),
+    )
+
+    _open_events(page, DESKTOP_VIEWPORT)
+
+    expect(page.locator("#btn-ack-all")).to_be_visible()

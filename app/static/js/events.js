@@ -284,10 +284,14 @@ function loadEvents(append) {
             var eventsViewEl = document.getElementById('view-events');
             if (badgeRequestId === _badgeRequestCount && eventsViewEl && eventsViewEl.classList.contains('active')) {
                 updateEventBadge(unack);
-                ackAllBtn.style.display = unack > 0 ? '' : 'none';
             }
 
             if (feedRequestId === _eventsRequestCount) {
+                // The ack-all button belongs to the feed, not the badge: every caller that
+                // switches to or re-filters the events view calls refreshEventBadge() right
+                // after loadEvents(), which bumps _badgeRequestCount before this response
+                // lands, so the badge guard above is always stale here.
+                ackAllBtn.style.display = unack > 0 ? '' : 'none';
                 if (events.length === 0 && !append) {
                     feedCard.style.display = '';
                     empty.textContent = T.event_no_events || 'No events detected yet.';
