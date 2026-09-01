@@ -205,6 +205,7 @@ def test_connection_monitor_zoom_and_reset_button_survive_same_range_refresh(dem
     assert refreshed["xMax"] == zoomed["xMax"], "same-range refresh should keep the zoomed x window"
     expect(page.locator("#cm-combined-chart button", has_text="Reset Zoom")).to_be_visible()
 
+
 def test_connection_monitor_hidden_source_survives_data_refresh(demo_page):
     """Hiding a source via the chart legend must persist across the live data refresh."""
     page = demo_page
