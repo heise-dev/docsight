@@ -12,6 +12,7 @@
     var lastResolution = 'raw';
     var pinnedDayView = null; // { date: 'YYYY-MM-DD', start: epoch, end: epoch } when viewing a pinned day
     var zoomWindow = null; // { start, end, span, followLive } when the chart is zoomed into a sub-window
+    var loadSeq = 0; // guards against a slow response overwriting a newer one
 
     function updateRefreshInterval() {
         if (refreshTimer) clearInterval(refreshTimer);
@@ -63,8 +64,11 @@
         if (start == null || end == null || !(end > start)) return;
         // Only a selection that reaches the newest sample AND actually sits at the
         // live edge follows now; a pinned day or a window into the past stays put.
+        // The tolerance never drops below 60s: a narrow selection can be shorter
+        // than the age of the newest sample, and misreading it as historical would
+        // freeze the chart with the refresh timer stopped.
         var followLive = !!atLastSample && !pinnedDayView &&
-            (Date.now() / 1000) - end <= (end - start);
+            (Date.now() / 1000) - end <= Math.max(end - start, 60);
         zoomWindow = { start: start, end: end, span: end - start, followLive: followLive };
         loadData();
         updateRefreshInterval();
@@ -298,6 +302,7 @@
     function loadData() {
         if (targets.length === 0) { showNoData(); return; }
 
+        var seq = ++loadSeq;
         var now = Date.now() / 1000;
         var start, end;
         if (zoomWindow) {
@@ -313,7 +318,11 @@
         }
         var maxPoints;
         if (zoomWindow) {
-            maxPoints = getMaxPointsForRange(end - start);
+            // Always cap a zoom window: below 24h getMaxPointsForRange asks for
+            // everything, which for a sub-day window of raw pings is far heavier
+            // than the capped range it was zoomed out of. The chart is never wider
+            // than ~1440px and the server leaves anything under the cap untouched.
+            maxPoints = Math.max(getMaxPointsForRange(end - start), 1440);
         } else {
             maxPoints = pinnedDayView ? 0 : getMaxPointsForRange(currentRange);
         }
@@ -346,6 +355,9 @@
 
         Promise.all([Promise.all(samplePromises), Promise.all(outagePromises), statsPromise])
             .then(function(results) {
+                // A second zoom can be dragged while this one is still in flight;
+                // the newest load owns the view, so drop anything overtaken
+                if (seq !== loadSeq) return;
                 var allTargetData = results[0];
                 var allOutageData = results[1];
                 var statsByTarget = results[2] || {};
