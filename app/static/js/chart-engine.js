@@ -406,8 +406,26 @@ function prepareContainer(canvasId) {
 }
 
 /* ── Render Chart ── */
+/* Max consecutive renders skipped while a zoom drag is in flight — bounded so a missed
+   mouseup (released outside the window, tab switch) can never freeze a chart forever. */
+var MAX_DRAG_SKIP_RENDERS = 2;
+
+/* uPlot sizes u.select live while the user drags; both zoom plugins clear it again in
+   their setSelect hook, so a non-zero width means a drag is still in flight. */
+function isDragInFlight(u) {
+    return !!(u && u.select && u.select.width > 0);
+}
+
 function renderChart(canvasId, labels, datasets, type, zones, opts) {
     var existing = charts[canvasId];
+
+    // A rebuild destroys the selection rectangle, so skip the live update instead of
+    // cancelling the user's drag — the next render (or the bound below) rebuilds.
+    if (existing && isDragInFlight(existing)) {
+        existing._docsightDragSkips = (existing._docsightDragSkips || 0) + 1;
+        if (existing._docsightDragSkips <= MAX_DRAG_SKIP_RENDERS) return;
+    }
+
     // Save zoom state before potential destroy — restore after recreate
     var savedZoom = existing && existing._zoomRange ? existing._zoomRange : null;
     // Zoom is bound to the x-domain the caller identifies — drop it when that changes
