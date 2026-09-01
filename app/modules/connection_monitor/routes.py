@@ -208,14 +208,24 @@ _AGG_60S_MAX_AGE = 30 * 86400
 _AGG_300S_MAX_AGE = 90 * 86400
 
 
-def _compress_samples(samples: list[dict], start: float | None, end: float | None, max_points: int | None) -> list[dict]:
-    """Downsample chart samples to keep browser payloads bounded."""
-    if not max_points or max_points <= 0 or len(samples) <= max_points:
+def _compression_bucket_seconds(range_start: float, range_end: float, max_points: int) -> int:
+    """Width of the buckets _compress_samples lays over a range."""
+    return max(1, math.ceil(max(range_end - range_start, 1) / max_points))
+
+
+def _compress_samples(samples: list[dict], start: float | None, end: float | None, max_points: int | None, force: bool = False) -> list[dict]:
+    """Downsample chart samples to keep browser payloads bounded.
+
+    force skips the length check for callers that already pre-bucketed part of
+    the data on this exact grid, where len(samples) no longer reflects how many
+    rows the range holds.
+    """
+    if not max_points or max_points <= 0 or (not force and len(samples) <= max_points):
         return samples
 
     range_start = start if start is not None else samples[0]["timestamp"]
     range_end = end if end is not None else samples[-1]["timestamp"]
-    bucket_seconds = max(1, math.ceil(max(range_end - range_start, 1) / max_points))
+    bucket_seconds = _compression_bucket_seconds(range_start, range_end, max_points)
     buckets: dict[int, dict] = {}
 
     for sample in samples:
@@ -331,6 +341,50 @@ def _append_aggregated_samples(samples: list[dict], agg_rows: list[dict]) -> int
         count += 1
     return count
 
+
+def _append_raw_tier(
+    samples: list[dict],
+    storage,
+    target_id: int,
+    start: float | None,
+    end: float | None,
+    limit: int,
+    grid: tuple[float, int, int] | None,
+) -> int:
+    """Append the raw tier and report how many raw rows it stands for.
+
+    With a compression grid (anchor, bucket_seconds, max_points) the rows are
+    bucketed by SQLite on that same grid, so a long range no longer streams
+    every raw row into the process just for _compress_samples to throw it away.
+    The partial bucket at the start stays row-per-sample because a lower tier
+    can share it, and a slice the compressor would have left alone falls back
+    to the plain read.
+    """
+    if grid is None:
+        return _append_raw_samples(
+            samples, storage.get_samples(target_id, start=start, end=end, limit=limit)
+        )
+
+    anchor, bucket_seconds, max_points = grid
+    split = anchor + math.ceil((start - anchor) / bucket_seconds) * bucket_seconds
+    head = []
+    if split > start:
+        head = storage.get_samples(
+            target_id, start=start, end=min(_exclusive_upper_bound(split), end), limit=limit
+        )
+    buckets = storage.get_samples_bucketed(
+        target_id, start=split, end=end, bucket_seconds=bucket_seconds, anchor=anchor,
+    )
+    raw_rows = len(head) + sum(b["sample_count"] for b in buckets)
+    if raw_rows <= max_points:
+        return _append_raw_samples(
+            samples, storage.get_samples(target_id, start=start, end=end, limit=limit)
+        )
+    _append_raw_samples(samples, head)
+    _append_aggregated_samples(samples, buckets)
+    return raw_rows
+
+
 @bp.route("/api/connection-monitor/samples/<int:target_id>")
 @require_auth
 def api_get_samples(target_id):
@@ -361,13 +415,24 @@ def api_get_samples(target_id):
         res_name = resolution
         blended = False
 
+    # Grid _compress_samples will lay over the payload. It also lets SQLite
+    # pre-bucket the raw tier, which only pays off from 2s buckets up and only
+    # applies to unlimited reads - a positive limit already bounds the read and
+    # keeps counting raw rows rather than buckets.
+    grid = None
+    if has_explicit_range and max_points and max_points > 0 and limit <= 0:
+        grid_seconds = _compression_bucket_seconds(start, end, max_points)
+        if grid_seconds >= 2:
+            grid = (start, grid_seconds, max_points)
+
     samples = []
     tiers_used: list[str] = []
+    raw_rows = 0
 
     if resolution != "auto" or not has_explicit_range:
         if bucket_seconds is None:
-            raw = storage.get_samples(target_id, start=start, end=end, limit=limit)
-            if _append_raw_samples(samples, raw):
+            raw_rows = _append_raw_tier(samples, storage, target_id, start, end, limit, grid)
+            if raw_rows:
                 tiers_used.append("raw")
         else:
             agg = storage.get_aggregated_samples(
@@ -383,8 +448,10 @@ def api_get_samples(target_id):
         if range_start <= range_end:
             raw_start = max(range_start, now_ts - _RAW_MAX_AGE)
             if raw_start <= range_end:
-                raw = storage.get_samples(target_id, start=raw_start, end=end, limit=limit)
-                if _append_raw_samples(samples, raw):
+                raw_rows = _append_raw_tier(
+                    samples, storage, target_id, raw_start, end, limit, grid,
+                )
+                if raw_rows:
                     tiers_used.append("raw")
 
             agg_60_start = max(range_start, now_ts - _AGG_60S_MAX_AGE)
@@ -414,7 +481,12 @@ def api_get_samples(target_id):
                     tiers_used.append("1hr")
 
     samples.sort(key=lambda s: s["timestamp"])
-    samples = _compress_samples(samples, start=start, end=end, max_points=max_points)
+    # A pre-bucketed raw tier left SQLite already compressed, so the row count
+    # that decides compression is the raw one, not what is left in samples.
+    samples = _compress_samples(
+        samples, start=start, end=end, max_points=max_points,
+        force=grid is not None and raw_rows > max_points,
+    )
 
     return jsonify({
         "meta": {
