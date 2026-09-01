@@ -17,7 +17,7 @@ from app.web import get_config_manager, require_auth, _get_tz_name
 from app.runtime import current_runtime
 
 from .probe import ProbeEngine
-from .storage import ConnectionMonitorStorage
+from .storage import ConnectionMonitorStorage, _exclusive_upper_bound
 from .traceroute_probe import TracerouteProbe
 
 logger = logging.getLogger(__name__)
@@ -291,11 +291,6 @@ def _compress_samples(samples: list[dict], start: float | None, end: float | Non
         })
 
     return compressed
-
-
-def _exclusive_upper_bound(value: float) -> float:
-    """Turn an inclusive tier boundary into an exclusive upper limit."""
-    return math.nextafter(value, float("-inf"))
 
 
 def _append_raw_samples(samples: list[dict], raw_rows: list[dict]) -> int:

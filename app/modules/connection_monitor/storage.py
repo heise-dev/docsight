@@ -12,6 +12,11 @@ import time
 logger = logging.getLogger(__name__)
 
 
+def _exclusive_upper_bound(value: float) -> float:
+    """Turn an inclusive tier boundary into an exclusive upper limit."""
+    return math.nextafter(value, float("-inf"))
+
+
 class ConnectionMonitorStorage:
     """Manages connection_targets and connection_samples tables."""
 
@@ -177,12 +182,111 @@ class ConnectionMonitorStorage:
             rows = conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
 
+    def _aggregated_sub_windows(
+        self,
+        start: float | None,
+        end: float | None,
+        now: float,
+    ) -> list[tuple[str, int, float | None, float]]:
+        """Split the older part of a window into per-tier sub-windows.
+
+        Mirrors how the samples API blends by data age: raw rows cover the
+        part newer than _TIER_RAW_MAX_AGE, the 60s/300s/3600s buckets cover
+        progressively older parts. Upper bounds are made exclusive so a
+        sample can never be counted in two tiers.
+        """
+        range_start = start if start is not None else float("-inf")
+        range_end = end if end is not None else now
+        windows: list[tuple[str, int, float | None, float]] = []
+        if range_start > range_end:
+            return windows
+        for name, bucket_seconds, max_age, newer_age in (
+            ("1min", 60, self._TIER_60S_MAX_AGE, self._TIER_RAW_MAX_AGE),
+            ("5min", 300, self._TIER_300S_MAX_AGE, self._TIER_60S_MAX_AGE),
+            ("1hr", 3600, None, self._TIER_300S_MAX_AGE),
+        ):
+            tier_start = range_start if max_age is None else max(range_start, now - max_age)
+            tier_end = _exclusive_upper_bound(min(range_end, now - newer_age))
+            if tier_start <= tier_end:
+                windows.append((
+                    name, bucket_seconds,
+                    None if tier_start == float("-inf") else tier_start,
+                    tier_end,
+                ))
+        return windows
+
+    # Raw wins wherever raw exists: a bucket is skipped as soon as any raw row
+    # still covers its span, whether because the day is pinned or because
+    # aggregate() has not folded it away yet. Backed by idx_samples_target_ts.
+    # Cost: at most one bucket per raw/bucket junction is dropped while its
+    # span is shared, until the next aggregate() rebuilds it complete.
+    _RAW_SURVIVES_EXCLUSION = (
+        "NOT EXISTS (SELECT 1 FROM connection_samples cs "
+        "WHERE cs.target_id = connection_samples_aggregated.target_id "
+        "AND cs.timestamp >= connection_samples_aggregated.bucket_start "
+        "AND cs.timestamp < connection_samples_aggregated.bucket_start "
+        "+ connection_samples_aggregated.bucket_seconds)"
+    )
+
+    def _tier_buckets(
+        self,
+        target_id: int,
+        bucket_seconds: int,
+        start: float | None,
+        end: float | None,
+    ) -> list[dict]:
+        """Aggregated buckets for one tier, minus spans whose raw rows survived.
+
+        The exclusion is per bucket and data-driven rather than keyed on the
+        pinned-day list, so it stays correct while a just-unpinned day waits
+        for the next aggregate(), for a date pinned after its raw was already
+        pruned, and for buckets straddling local midnight.
+        """
+        clauses = ["target_id = ?", "bucket_seconds = ?", self._RAW_SURVIVES_EXCLUSION]
+        params: list[object] = [target_id, bucket_seconds]
+        if start is not None:
+            clauses.append("bucket_start >= ?")
+            params.append(start)
+        if end is not None:
+            clauses.append("bucket_start <= ?")
+            params.append(end)
+        where = " AND ".join(clauses)
+        with self._read() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM connection_samples_aggregated WHERE {where} ORDER BY bucket_start",
+                params,
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def get_range_stats(
         self,
         target_id: int,
         start: float | None = None,
         end: float | None = None,
     ) -> dict[str, object]:
+        """Range statistics blended across raw samples and aggregated tiers.
+
+        Raw rows normally survive only _TIER_RAW_MAX_AGE, so a window reaching
+        further back is completed from the 60s/300s/3600s buckets. The split is
+        data-driven rather than age-driven: raw is read over the whole window
+        and a bucket is skipped whenever raw still covers its span, so raw wins
+        wherever raw exists. That keeps pinned days exact, covers raw rows that
+        aggregate() has not folded away yet (the demo collector, a stopped
+        collector, or simply the up-to-15-minute lag at the 7d edge), and still
+        cannot double count.
+        ``tiers_used`` lists the tiers that actually contributed rows.
+
+        p95 is approximate as soon as buckets contribute, and biased HIGH:
+        each bucket's own p95 stands in for all of that bucket's samples,
+        weighted by its estimated latency count. Taking MAX() of the bucket p95
+        values instead would degenerate into "the worst minute of the window"
+        over long ranges.
+        """
+        now = time.time()
+        agg_windows = self._aggregated_sub_windows(start, end, now)
+        if agg_windows:
+            return self._blended_range_stats(target_id, start, end, now, agg_windows)
+
         where, params = self._build_sample_where(target_id, start=start, end=end)
         with self._read() as conn:
             row = conn.execute(
@@ -219,7 +323,146 @@ class ConnectionMonitorStorage:
                 stats["p95_latency_ms"] = p95_row["latency_ms"] if p95_row else None
             else:
                 stats["p95_latency_ms"] = None
+            stats["tiers_used"] = ["raw"] if stats.get("sample_count") else []
             return stats
+
+    def _blended_range_stats(
+        self,
+        target_id: int,
+        start: float | None,
+        end: float | None,
+        now: float,
+        agg_windows: list[tuple[str, int, float | None, float]],
+    ) -> dict[str, object]:
+        """Combine raw rows with aggregated buckets for get_range_stats."""
+        tiers_used: list[str] = []
+        sample_count = 0
+        latency_count = 0
+        latency_sum = 0.0
+        timeout_total = 0.0
+        min_latency = None
+        max_latency = None
+        # Bucket p95 stand-ins as (value, weight); raw latencies stay a plain
+        # sorted float list so a 30d window never materialises 100k+ tuples.
+        bucket_p95: list[tuple[float, int]] = []
+
+        where, params = self._build_sample_where(target_id, start=start, end=end)
+        with self._read() as conn:
+            row = conn.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS sample_count,
+                    SUM(CASE WHEN timeout = 1 THEN 1 ELSE 0 END) AS timeout_count,
+                    COUNT(CASE WHEN timeout = 0 AND latency_ms IS NOT NULL THEN 1 END) AS latency_count,
+                    SUM(CASE WHEN timeout = 0 THEN latency_ms END) AS latency_sum,
+                    MIN(CASE WHEN timeout = 0 THEN latency_ms END) AS min_latency_ms,
+                    MAX(CASE WHEN timeout = 0 THEN latency_ms END) AS max_latency_ms
+                FROM connection_samples
+                WHERE {where}
+                """,
+                params,
+            ).fetchone()
+            # The ordered list only feeds the quantile walk; the totals above
+            # come straight from SQLite.
+            latencies = [
+                r[0] for r in conn.execute(
+                    f"""
+                    SELECT latency_ms
+                    FROM connection_samples
+                    WHERE {where} AND timeout = 0 AND latency_ms IS NOT NULL
+                    ORDER BY latency_ms
+                    """,
+                    params,
+                )
+            ]
+        if row["sample_count"]:
+            tiers_used.append("raw")
+            sample_count += row["sample_count"]
+            timeout_total += row["timeout_count"] or 0
+        if row["latency_count"]:
+            latency_count += row["latency_count"]
+            latency_sum += row["latency_sum"] or 0.0
+            min_latency = row["min_latency_ms"]
+            max_latency = row["max_latency_ms"]
+
+        for name, bucket_seconds, tier_start, tier_end in agg_windows:
+            buckets = self._tier_buckets(target_id, bucket_seconds, tier_start, tier_end)
+            if not buckets:
+                continue
+            tiers_used.append(name)
+            for b in buckets:
+                count = b["sample_count"] or 0
+                loss_pct = b["packet_loss_pct"] or 0.0
+                sample_count += count
+                timeout_total += count * loss_pct / 100.0
+                # Buckets keep no per-sample latencies, so estimate how many
+                # of them carried one from the recorded packet loss.
+                latency_est = round(count * (1.0 - loss_pct / 100.0))
+                if latency_est <= 0:
+                    continue
+                if b["avg_latency_ms"] is not None:
+                    latency_count += latency_est
+                    latency_sum += b["avg_latency_ms"] * latency_est
+                if b["min_latency_ms"] is not None:
+                    min_latency = (
+                        b["min_latency_ms"] if min_latency is None
+                        else min(min_latency, b["min_latency_ms"])
+                    )
+                if b["max_latency_ms"] is not None:
+                    max_latency = (
+                        b["max_latency_ms"] if max_latency is None
+                        else max(max_latency, b["max_latency_ms"])
+                    )
+                if b["p95_latency_ms"] is not None:
+                    bucket_p95.append((b["p95_latency_ms"], latency_est))
+
+        p95_latency = self._weighted_p95(latencies, bucket_p95)
+
+        return {
+            "sample_count": sample_count,
+            "latency_count": latency_count,
+            "avg_latency_ms": latency_sum / latency_count if latency_count > 0 else None,
+            "min_latency_ms": min_latency,
+            "max_latency_ms": max_latency,
+            "packet_loss_pct": (
+                round(timeout_total / sample_count * 100, 2) if sample_count else None
+            ),
+            "p95_latency_ms": p95_latency,
+            "tiers_used": tiers_used,
+        }
+
+    @staticmethod
+    def _weighted_p95(
+        latencies: list[float],
+        bucket_p95: list[tuple[float, int]],
+    ) -> float | None:
+        """Weighted nearest-rank p95 over raw values plus bucket stand-ins.
+
+        Both inputs are walked two-pointer style, so no combined list is built
+        and the raw side reuses the ordering SQL already produced.
+        """
+        raw_len = len(latencies)
+        bucket_len = len(bucket_p95)
+        total_weight = raw_len + sum(w for _, w in bucket_p95)
+        if total_weight <= 0:
+            return None
+        bucket_p95.sort(key=lambda pair: pair[0])
+        rank = max(1, math.ceil(total_weight * 0.95))
+        cumulative = 0
+        value = None
+        i = j = 0
+        while i < raw_len or j < bucket_len:
+            if j >= bucket_len or (i < raw_len and latencies[i] <= bucket_p95[j][0]):
+                value = latencies[i]
+                cumulative += 1
+                i += 1
+            else:
+                value, weight = bucket_p95[j]
+                cumulative += weight
+                j += 1
+            if cumulative >= rank:
+                break
+        return value
 
     # --- Summary ---
 
@@ -248,7 +491,206 @@ class ConnectionMonitorStorage:
         start: float | None = None,
         end: float | None = None,
     ) -> list[dict]:
-        """Derive outages from consecutive timeout sequences."""
+        """Derive outages from consecutive timeout sequences.
+
+        Raw rows that aggregate() has already folded away are replaced by runs
+        of fully-lost aggregated buckets, flagged with "approximate": True. As
+        in get_range_stats the split is data-driven: raw is read over the whole
+        window and a bucket is skipped whenever raw still covers its span, so
+        raw wins wherever raw exists. Surviving raw is therefore not
+        contiguous, and a run is cut wherever raw coverage has a gap. A bucket
+        run adjacent to a raw run is merged with it once, before the threshold
+        is applied, so an outage straddling the boundary is not lost to both
+        halves being too short. Bucket runs are never merged with each other
+        because the bucket sizes differ across a tier boundary.
+        """
+        now = time.time()
+        agg_windows = self._aggregated_sub_windows(start, end, now)
+        if not agg_windows:
+            return self._raw_outages(target_id, threshold, start, end)
+
+        candidates = self._raw_outage_candidates(target_id, start, end)
+        newest_bucket_end = None
+        for _name, bucket_seconds, tier_start, tier_end in agg_windows:
+            buckets = self._tier_buckets(target_id, bucket_seconds, tier_start, tier_end)
+            if not buckets:
+                continue
+            coverage_end = buckets[-1]["bucket_start"] + bucket_seconds
+            if newest_bucket_end is None or coverage_end > newest_bucket_end:
+                newest_bucket_end = coverage_end
+            candidates.extend(self._bucket_outage_candidates(buckets, bucket_seconds))
+
+        candidates.sort(key=lambda c: c["start"])
+        # As in the raw-only path an unterminated run is still running, but
+        # only when nothing in the window covers a later moment.
+        if candidates:
+            newest = candidates[-1]
+            if newest.pop("open", False) and (
+                newest_bucket_end is None or newest_bucket_end <= newest["duration_end"]
+            ):
+                newest["end"] = None
+        return self._merge_outage_candidates(candidates, threshold)
+
+    @staticmethod
+    def _bucket_outage_candidates(buckets: list[dict], bucket_seconds: int) -> list[dict]:
+        """Unthresholded outage runs of time-adjacent 100%-loss buckets."""
+        candidates: list[dict] = []
+        run: list[dict] = []
+
+        def close_run():
+            if not run:
+                return
+            run_start = run[0]["bucket_start"]
+            run_end = run[-1]["bucket_start"] + bucket_seconds
+            candidates.append({
+                "start": run_start,
+                "end": run_end,
+                "duration_end": run_end,
+                "timeout_count": sum(b["sample_count"] or 0 for b in run),
+                "approximate": True,
+                "bucket_seconds": bucket_seconds,
+            })
+            run.clear()
+
+        for b in buckets:
+            lost = b["packet_loss_pct"] == 100.0
+            if lost and run and b["bucket_start"] != run[-1]["bucket_start"] + bucket_seconds:
+                close_run()
+            if not lost:
+                close_run()
+                continue
+            run.append(b)
+        close_run()
+        return candidates
+
+    # A wider hole than this in the surviving raw rows is missing coverage,
+    # not a continuous outage. Slow targets widen it: a handful of missed
+    # polls is still one outage, and no setting caps poll_interval_ms.
+    _RAW_COVERAGE_GAP = 3600
+
+    def _raw_outage_candidates(
+        self,
+        target_id: int,
+        start: float | None,
+        end: float | None,
+    ) -> list[dict]:
+        """Unthresholded raw timeout runs, cut at gaps in raw coverage."""
+        target = self.get_target(target_id)
+        poll_interval_ms = (target or {}).get("poll_interval_ms") or 0
+        max_gap = max(self._RAW_COVERAGE_GAP, 5 * poll_interval_ms / 1000.0)
+
+        where, params = self._build_sample_where(target_id, start=start, end=end)
+        with self._read() as conn:
+            rows = conn.execute(
+                f"SELECT timestamp, timeout FROM connection_samples WHERE {where} ORDER BY timestamp",
+                params,
+            ).fetchall()
+
+        segments: list[list] = []
+        for row in rows:
+            if segments and row["timestamp"] - segments[-1][-1]["timestamp"] <= max_gap:
+                segments[-1].append(row)
+            else:
+                segments.append([row])
+
+        candidates: list[dict] = []
+        for index, segment in enumerate(segments):
+            # Only the newest segment can hold a still-running outage; whether
+            # it really is the newest coverage is settled by the caller.
+            candidates.extend(self._segment_outage_candidates(
+                segment, index == len(segments) - 1,
+            ))
+        return candidates
+
+    @staticmethod
+    def _segment_outage_candidates(rows: list, allow_ongoing: bool) -> list[dict]:
+        candidates: list[dict] = []
+        run_start = None
+        run_count = 0
+        for row in rows:
+            if row["timeout"]:
+                if run_start is None:
+                    run_start = row["timestamp"]
+                run_count += 1
+                continue
+            if run_count:
+                candidates.append({
+                    "start": run_start,
+                    "end": row["timestamp"],
+                    "duration_end": row["timestamp"],
+                    "timeout_count": run_count,
+                    "approximate": False,
+                    "bucket_seconds": None,
+                })
+            run_start = None
+            run_count = 0
+        if run_count:
+            last_ts = rows[-1]["timestamp"]
+            candidates.append({
+                "start": run_start,
+                "end": last_ts,
+                "duration_end": last_ts,
+                "timeout_count": run_count,
+                "approximate": False,
+                "bucket_seconds": None,
+                # this run has no terminating sample, so it may still be open
+                "open": allow_ongoing,
+            })
+        return candidates
+
+    @staticmethod
+    def _outage_candidates_adjacent(prev: dict, cand: dict) -> bool:
+        """Whether a bucket run and a raw run belong to the same outage."""
+        if prev["approximate"] == cand["approximate"] or prev["end"] is None:
+            return False
+        # One merge per outage: a merged run must not look like a bucket run
+        # to the next raw candidate and swallow it too.
+        if prev.get("merged"):
+            return False
+        slack = prev["bucket_seconds"] or cand["bucket_seconds"]
+        # A bucket run is clamped to the raw run's first sample so the two
+        # halves of a merged outage cannot overlap.
+        prev_end = min(prev["end"], cand["start"]) if prev["bucket_seconds"] else prev["end"]
+        return cand["start"] <= prev_end + slack
+
+    def _merge_outage_candidates(self, candidates: list[dict], threshold: int) -> list[dict]:
+        """Join boundary-straddling runs, then apply the threshold once."""
+        merged: list[dict] = []
+        for cand in candidates:
+            if merged and self._outage_candidates_adjacent(merged[-1], cand):
+                prev = merged[-1]
+                prev["end"] = cand["end"]
+                prev["duration_end"] = cand["duration_end"]
+                prev["timeout_count"] += cand["timeout_count"]
+                prev["approximate"] = True
+                prev["bucket_seconds"] = prev["bucket_seconds"] or cand["bucket_seconds"]
+                prev["merged"] = True
+                continue
+            merged.append(dict(cand))
+
+        outages = []
+        for cand in merged:
+            if cand["timeout_count"] < threshold:
+                continue
+            outage = {
+                "start": cand["start"],
+                "end": cand["end"],
+                "duration_seconds": round(cand["duration_end"] - cand["start"], 1),
+                "timeout_count": cand["timeout_count"],
+            }
+            if cand["approximate"]:
+                outage["approximate"] = True
+            outages.append(outage)
+        return outages
+
+    def _raw_outages(
+        self,
+        target_id: int,
+        threshold: int,
+        start: float | None,
+        end: float | None,
+    ) -> list[dict]:
+        """Derive outages from consecutive timeout sequences in raw samples."""
         clauses = ["target_id = ?"]
         params: list[object] = [target_id]
         if start is not None:
