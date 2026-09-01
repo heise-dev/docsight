@@ -380,6 +380,64 @@ def _append_raw_tier(
     return raw_rows
 
 
+def _collect_blended_samples(
+    storage,
+    target_id: int,
+    start: float,
+    end: float,
+    limit: int,
+    grid: tuple[float, int, int] | None = None,
+) -> tuple[list[dict], list[str], int]:
+    """Read a window from every retention tier that covers part of it.
+
+    The tiers are mutually exclusive - raw rows are deleted once they are
+    rolled up - so a window wider than one tier can only be served by reading
+    each of them. Returns the samples (unsorted), the tiers they came from and
+    how many raw rows the raw tier stands for.
+    """
+    samples: list[dict] = []
+    tiers_used: list[str] = []
+    raw_rows = 0
+    now_ts = time.time()
+
+    if start > end:
+        return samples, tiers_used, raw_rows
+
+    raw_start = max(start, now_ts - _RAW_MAX_AGE)
+    if raw_start <= end:
+        raw_rows = _append_raw_tier(samples, storage, target_id, raw_start, end, limit, grid)
+        if raw_rows:
+            tiers_used.append("raw")
+
+    agg_60_start = max(start, now_ts - _AGG_60S_MAX_AGE)
+    agg_60_end = _exclusive_upper_bound(min(end, now_ts - _RAW_MAX_AGE))
+    if agg_60_start <= agg_60_end:
+        agg_60 = storage.get_aggregated_samples(
+            target_id, bucket_seconds=60, start=agg_60_start, end=agg_60_end,
+        )
+        if _append_aggregated_samples(samples, agg_60):
+            tiers_used.append("1min")
+
+    agg_300_start = max(start, now_ts - _AGG_300S_MAX_AGE)
+    agg_300_end = _exclusive_upper_bound(min(end, now_ts - _AGG_60S_MAX_AGE))
+    if agg_300_start <= agg_300_end:
+        agg_300 = storage.get_aggregated_samples(
+            target_id, bucket_seconds=300, start=agg_300_start, end=agg_300_end,
+        )
+        if _append_aggregated_samples(samples, agg_300):
+            tiers_used.append("5min")
+
+    agg_3600_end = _exclusive_upper_bound(min(end, now_ts - _AGG_300S_MAX_AGE))
+    if (end - start) > _AGG_300S_MAX_AGE and start <= agg_3600_end:
+        agg_3600 = storage.get_aggregated_samples(
+            target_id, bucket_seconds=3600, start=start, end=agg_3600_end,
+        )
+        if _append_aggregated_samples(samples, agg_3600):
+            tiers_used.append("1hr")
+
+    return samples, tiers_used, raw_rows
+
+
 @bp.route("/api/connection-monitor/samples/<int:target_id>")
 @require_auth
 def api_get_samples(target_id):
@@ -436,44 +494,9 @@ def api_get_samples(target_id):
             if _append_aggregated_samples(samples, agg):
                 tiers_used.append(res_name)
     else:
-        now_ts = time.time()
-        range_start = start if start is not None else float("-inf")
-        range_end = end if end is not None else now_ts
-
-        if range_start <= range_end:
-            raw_start = max(range_start, now_ts - _RAW_MAX_AGE)
-            if raw_start <= range_end:
-                raw_rows = _append_raw_tier(
-                    samples, storage, target_id, raw_start, end, limit, grid,
-                )
-                if raw_rows:
-                    tiers_used.append("raw")
-
-            agg_60_start = max(range_start, now_ts - _AGG_60S_MAX_AGE)
-            agg_60_end = _exclusive_upper_bound(min(range_end, now_ts - _RAW_MAX_AGE))
-            if agg_60_start <= agg_60_end:
-                agg_60 = storage.get_aggregated_samples(
-                    target_id, bucket_seconds=60, start=agg_60_start, end=agg_60_end,
-                )
-                if _append_aggregated_samples(samples, agg_60):
-                    tiers_used.append("1min")
-
-            agg_300_start = max(range_start, now_ts - _AGG_300S_MAX_AGE)
-            agg_300_end = _exclusive_upper_bound(min(range_end, now_ts - _AGG_60S_MAX_AGE))
-            if agg_300_start <= agg_300_end:
-                agg_300 = storage.get_aggregated_samples(
-                    target_id, bucket_seconds=300, start=agg_300_start, end=agg_300_end,
-                )
-                if _append_aggregated_samples(samples, agg_300):
-                    tiers_used.append("5min")
-
-            agg_3600_end = _exclusive_upper_bound(min(range_end, now_ts - _AGG_300S_MAX_AGE))
-            if time_range > _AGG_300S_MAX_AGE and range_start <= agg_3600_end:
-                agg_3600 = storage.get_aggregated_samples(
-                    target_id, bucket_seconds=3600, start=range_start, end=agg_3600_end,
-                )
-                if _append_aggregated_samples(samples, agg_3600):
-                    tiers_used.append("1hr")
+        samples, tiers_used, raw_rows = _collect_blended_samples(
+            storage, target_id, start, end, limit, grid,
+        )
 
     samples.sort(key=lambda s: s["timestamp"])
     # A pre-bucketed raw tier left SQLite already compressed, so the row count
@@ -657,7 +680,20 @@ def api_export_csv(target_id):
 
     bucket_seconds = _RESOLUTION_MAP.get(resolution)
 
-    if bucket_seconds is not None:
+    if resolution == "auto" and start is not None and end is not None:
+        # Blended export: reads every retention tier that covers part of the
+        # window, at full stored resolution, instead of answering a window wider
+        # than one tier with an empty single-tier file.
+        blended_samples, _, _ = _collect_blended_samples(storage, target_id, start, end, 0)
+        blended_samples.sort(key=lambda s: s["timestamp"])
+        writer.writerow(["datetime", "bucket_seconds", "avg_latency_ms", "min_latency_ms",
+                         "max_latency_ms", "p95_latency_ms", "packet_loss_pct", "sample_count"])
+        for s in blended_samples:
+            dt = datetime.fromtimestamp(s["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+            writer.writerow([dt, s["bucket_seconds"], s["latency_ms"],
+                             s["min_latency_ms"], s["max_latency_ms"],
+                             s["p95_latency_ms"], s["packet_loss_pct"], s["sample_count"]])
+    elif bucket_seconds is not None:
         # Aggregated export
         writer.writerow(["datetime", "avg_latency_ms", "min_latency_ms",
                          "max_latency_ms", "p95_latency_ms", "packet_loss_pct", "sample_count"])

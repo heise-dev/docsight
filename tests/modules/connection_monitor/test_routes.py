@@ -917,6 +917,47 @@ class TestExportAPI:
         assert "avg_latency_ms" in rows[0]
         assert "packet_loss_pct" in rows[0]
 
+    def test_csv_export_auto_blends_every_served_tier(self, client):
+        """A window spanning several tiers must export all of them, not an empty file."""
+        c, storage = client
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        storage.save_samples([
+            {"target_id": tid, "timestamp": now - 3600, "latency_ms": 10.0, "timeout": False, "probe_method": "tcp"},
+        ])
+        _save_buckets(storage, tid, 60, [{
+            "bucket_start": now - 8 * 86400, "avg_latency_ms": 15.0,
+            "min_latency_ms": 10.0, "max_latency_ms": 20.0, "p95_latency_ms": 18.0,
+            "packet_loss_pct": 0.0, "sample_count": 12,
+        }])
+        resp = c.get(
+            f"/api/connection-monitor/export/{tid}"
+            f"?start={now - 9 * 86400}&end={now}&resolution=auto"
+        )
+        assert resp.status_code == 200
+        rows = list(csv.reader(io.StringIO(resp.data.decode())))
+        assert rows[0] == ["datetime", "bucket_seconds", "avg_latency_ms", "min_latency_ms",
+                           "max_latency_ms", "p95_latency_ms", "packet_loss_pct", "sample_count"]
+        assert len(rows) == 3  # header + aggregated row + raw row
+        assert rows[1][1] == "60"
+        assert rows[1][2] == "15.0"
+        assert rows[2][1] == ""  # raw rows carry no bucket width
+        assert rows[2][2] == "10.0"
+
+    def test_csv_export_auto_without_range_stays_raw(self, client):
+        """Without an explicit window there is nothing to blend - keep the raw export."""
+        c, storage = client
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        storage.save_samples([
+            {"target_id": tid, "timestamp": now, "latency_ms": 10.0, "timeout": False, "probe_method": "tcp"},
+        ])
+        resp = c.get(f"/api/connection-monitor/export/{tid}?resolution=auto")
+        assert resp.status_code == 200
+        rows = list(csv.reader(io.StringIO(resp.data.decode())))
+        assert rows[0] == ["datetime", "latency_ms", "timeout", "probe_method"]
+        assert len(rows) == 2
+
     def test_pinglog_export_formats_raw_samples_for_isp_evidence(self, client):
         c, storage = client
         tid = storage.create_target("Cloudflare", "1.1.1.1")

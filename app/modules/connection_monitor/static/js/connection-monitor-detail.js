@@ -9,7 +9,7 @@
     var currentRange = 3600; // 1h default
     var targets = [];
     var refreshTimer = null;
-    var lastResolution = 'raw';
+    var lastMetaByTarget = {}; // target id -> the samples meta that target was served
     var pinnedDayView = null; // { date: 'YYYY-MM-DD', start: epoch, end: epoch } when viewing a pinned day
     var zoomWindow = null; // { start, end, span, followLive } when the chart is zoomed into a sub-window
     var loadSeq = 0; // guards against a slow response overwriting a newer one
@@ -116,9 +116,24 @@
         document.body.removeChild(a);
     }
 
+    // meta.resolution is derived from the window span; meta.tiers_used names the
+    // tiers actually served (by data age), which is the only truthful source for
+    // a window whose data is older than its span suggests.
+    function servedTiers(meta) {
+        return meta && Array.isArray(meta.tiers_used) ? meta.tiers_used : [];
+    }
+
+    function exportResolution(meta) {
+        var tiers = servedTiers(meta);
+        if (tiers.length === 1) return tiers[0];
+        if (tiers.length > 1) return 'auto'; // blended window: export reads every tier
+        return meta && meta.resolution ? meta.resolution : 'raw';
+    }
+
     window.cmExportCsv = function(targetId) {
         var range = getExportWindow();
-        triggerExport(docsightUrl('/api/connection-monitor/export/' + targetId + '?start=' + range.start + '&end=' + range.end + '&resolution=' + lastResolution));
+        var resolution = exportResolution(lastMetaByTarget[targetId]);
+        triggerExport(docsightUrl('/api/connection-monitor/export/' + targetId + '?start=' + range.start + '&end=' + range.end + '&resolution=' + resolution));
     };
 
     window.cmExportRawLog = function(targetId) {
@@ -397,7 +412,12 @@
                 }
 
                 var meta = allTargetData.length > 0 ? allTargetData[0].meta : null;
-                if (meta && meta.resolution) lastResolution = meta.resolution;
+                // tiers_used is per target - a target with no recent data can be served
+                // a different tier than its neighbour, so each export follows its own
+                lastMetaByTarget = {};
+                allTargetData.forEach(function(td) {
+                    lastMetaByTarget[td.target.id] = td.meta;
+                });
                 hideNoData();
                 CMCharts.renderStatsCards('cm-stats-cards', allTargetData);
                 CMCharts.renderPerTargetStats('cm-per-target-stats', allTargetData);
@@ -565,20 +585,22 @@
             '5min': el.dataset.label5min || '5-min averages',
             '1hr': el.dataset.label1hr || '1-hour averages'
         };
-        if (pinnedDayView) {
-            el.textContent = 'Pinned: ' + pinnedDayView.date + ' (full resolution)';
-            el.style.display = 'block';
-            return;
-        }
         // tiers_used names what was actually served; meta.resolution is derived from
         // the window span, which mislabels a short window over older, aggregated data
-        if (Array.isArray(meta.tiers_used) && meta.tiers_used.length > 0) {
-            el.textContent = meta.tiers_used.map(function(tier) {
+        var tiers = servedTiers(meta);
+        var text;
+        if (tiers.length > 0) {
+            text = tiers.map(function(tier) {
                 return labels[tier] || tier;
             }).join(' + ');
         } else {
-            el.textContent = labels[meta.resolution] || meta.resolution;
+            text = labels[meta.resolution] || meta.resolution;
         }
+        // A pinned day is raw only until a zoom inside it refetches by data age
+        if (pinnedDayView) {
+            text = 'Pinned: ' + pinnedDayView.date + ' (' + text + ')';
+        }
+        el.textContent = text;
         el.style.display = 'block';
     }
 
