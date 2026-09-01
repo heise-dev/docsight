@@ -40,6 +40,23 @@ def client(app):
     return flask_app.test_client(), storage
 
 
+def _save_buckets(storage, target_id, bucket_seconds, buckets):
+    """Insert aggregated buckets directly, bypassing the aggregation cascade."""
+    with storage._connect() as conn:
+        for b in buckets:
+            conn.execute(
+                """INSERT INTO connection_samples_aggregated
+                   (target_id, bucket_start, bucket_seconds, avg_latency_ms,
+                    min_latency_ms, max_latency_ms, p95_latency_ms,
+                    packet_loss_pct, sample_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (target_id, b["bucket_start"], bucket_seconds,
+                 b.get("avg_latency_ms"), b.get("min_latency_ms"),
+                 b.get("max_latency_ms"), b.get("p95_latency_ms"),
+                 b["packet_loss_pct"], b["sample_count"]),
+            )
+
+
 def _auth_session(c, marker_source=None):
     """Set authenticated session for protected routes."""
     with c.session_transaction() as sess:
@@ -594,6 +611,25 @@ class TestSummaryAPI:
         assert stats["sample_count"] == 4
         assert stats["latency_count"] == 3
         assert stats["p95_latency_ms"] == 30.0
+        assert stats["tiers_used"] == ["raw"]
+
+    def test_get_range_stats_reads_aggregated_tiers(self, client):
+        c, storage = client
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        base = ((now - 10 * 86400) // 60) * 60
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": base, "avg_latency_ms": 10.0, "min_latency_ms": 5.0,
+             "max_latency_ms": 20.0, "p95_latency_ms": 18.0,
+             "packet_loss_pct": 0.0, "sample_count": 60},
+        ])
+        resp = c.get(f"/api/connection-monitor/stats?start={base}&end={base + 60}")
+        assert resp.status_code == 200
+        stats = resp.get_json()[str(tid)]
+        assert stats["sample_count"] == 60
+        assert stats["avg_latency_ms"] == 10.0
+        assert stats["p95_latency_ms"] == 18.0
+        assert stats["tiers_used"] == ["1min"]
 
 
 class TestOutagesAPI:
@@ -610,6 +646,24 @@ class TestOutagesAPI:
         assert resp.status_code == 200
         data = resp.get_json()
         assert len(data) >= 1
+
+    def test_get_outages_reads_aggregated_tiers(self, client):
+        c, storage = client
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        base = ((now - 10 * 86400) // 60) * 60
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": base, "packet_loss_pct": 100.0, "sample_count": 6},
+        ])
+        resp = c.get(
+            f"/api/connection-monitor/outages/{tid}?start={base - 60}&end={base + 120}"
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data) == 1
+        assert data[0]["start"] == base
+        assert data[0]["duration_seconds"] == 60.0
+        assert data[0]["approximate"] is True
 
 
 class TestExportAPI:

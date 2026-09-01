@@ -2,6 +2,7 @@
 
 import sqlite3
 import time
+from datetime import datetime
 import pytest
 
 from app.modules.connection_monitor.storage import ConnectionMonitorStorage
@@ -11,6 +12,30 @@ from app.modules.connection_monitor.storage import ConnectionMonitorStorage
 def storage(tmp_path):
     db_path = str(tmp_path / "test_cm.db")
     return ConnectionMonitorStorage(db_path)
+
+
+def _save_buckets(storage, target_id, bucket_seconds, buckets):
+    """Insert aggregated buckets directly, bypassing the aggregation cascade."""
+    with storage._connect() as conn:
+        for b in buckets:
+            conn.execute(
+                """INSERT INTO connection_samples_aggregated
+                   (target_id, bucket_start, bucket_seconds, avg_latency_ms,
+                    min_latency_ms, max_latency_ms, p95_latency_ms,
+                    packet_loss_pct, sample_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (target_id, b["bucket_start"], bucket_seconds,
+                 b.get("avg_latency_ms"), b.get("min_latency_ms"),
+                 b.get("max_latency_ms"), b.get("p95_latency_ms"),
+                 b["packet_loss_pct"], b["sample_count"]),
+            )
+
+
+def _local_midday(timestamp):
+    """Midday of the local day a timestamp falls in, away from date edges."""
+    return datetime.fromtimestamp(timestamp).replace(
+        hour=12, minute=0, second=0, microsecond=0
+    ).timestamp()
 
 
 class TestTargetCRUD:
@@ -315,6 +340,289 @@ class TestSummary:
         assert stats["max_latency_ms"] == 30.0
         assert stats["p95_latency_ms"] == 30.0
         assert abs(stats["packet_loss_pct"] - 25.0) < 0.01
+        assert stats["tiers_used"] == ["raw"]
+
+    def test_range_stats_empty_window(self, storage):
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        stats = storage.get_range_stats(tid, start=now - 60, end=now)
+        assert stats["sample_count"] == 0
+        assert stats["avg_latency_ms"] is None
+        assert stats["p95_latency_ms"] is None
+        assert stats["tiers_used"] == []
+
+
+class TestTieredRangeStats:
+    """Windows reaching past the raw retention must read the bucket tiers."""
+
+    def test_range_stats_from_60s_buckets_only(self, storage):
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        base = ((now - 10 * 86400) // 60) * 60
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": base, "avg_latency_ms": 10.0, "min_latency_ms": 5.0,
+             "max_latency_ms": 20.0, "p95_latency_ms": 18.0,
+             "packet_loss_pct": 0.0, "sample_count": 60},
+            {"bucket_start": base + 60, "avg_latency_ms": 30.0, "min_latency_ms": 25.0,
+             "max_latency_ms": 40.0, "p95_latency_ms": 38.0,
+             "packet_loss_pct": 50.0, "sample_count": 60},
+            {"bucket_start": base + 120, "avg_latency_ms": None, "min_latency_ms": None,
+             "max_latency_ms": None, "p95_latency_ms": None,
+             "packet_loss_pct": 100.0, "sample_count": 40},
+        ])
+        stats = storage.get_range_stats(tid, start=base - 60, end=base + 180)
+        # latency estimates: 60 + 30 + 0 = 90 of 160 samples
+        assert stats["sample_count"] == 160
+        assert stats["latency_count"] == 90
+        assert abs(stats["avg_latency_ms"] - 1500.0 / 90.0) < 0.001
+        assert stats["min_latency_ms"] == 5.0
+        assert stats["max_latency_ms"] == 40.0
+        # timeouts: 0 + 30 + 40 = 70 of 160
+        assert stats["packet_loss_pct"] == 43.75
+        # weighted nearest rank: ceil(0.95 * 90) = 86 -> falls into the 38.0 bucket
+        assert stats["p95_latency_ms"] == 38.0
+        assert stats["tiers_used"] == ["1min"]
+
+    def test_range_stats_blends_raw_and_60s_buckets(self, storage):
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        base = ((now - 10 * 86400) // 60) * 60
+        storage.save_samples([
+            {"target_id": tid, "timestamp": now - 30, "latency_ms": 100.0, "timeout": False, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": now - 20, "latency_ms": 200.0, "timeout": False, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": now - 10, "latency_ms": None, "timeout": True, "probe_method": "tcp"},
+        ])
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": base, "avg_latency_ms": 50.0, "min_latency_ms": 50.0,
+             "max_latency_ms": 50.0, "p95_latency_ms": 50.0,
+             "packet_loss_pct": 0.0, "sample_count": 10},
+        ])
+        stats = storage.get_range_stats(tid, start=base, end=now)
+        assert stats["sample_count"] == 13
+        assert stats["latency_count"] == 12
+        assert abs(stats["avg_latency_ms"] - 800.0 / 12.0) < 0.001
+        assert stats["min_latency_ms"] == 50.0
+        assert stats["max_latency_ms"] == 200.0
+        assert stats["packet_loss_pct"] == 7.69
+        # weighted nearest rank: ceil(0.95 * 12) = 12 -> the slowest raw sample
+        assert stats["p95_latency_ms"] == 200.0
+        assert stats["tiers_used"] == ["raw", "1min"]
+
+    def test_range_stats_tier_boundary_is_exclusive(self, storage):
+        """A bucket sitting on the raw boundary must not be counted twice."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        boundary = now - storage._TIER_RAW_MAX_AGE
+        storage.save_samples([
+            {"target_id": tid, "timestamp": now - 10, "latency_ms": 10.0, "timeout": False, "probe_method": "tcp"},
+        ])
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": boundary + 60, "avg_latency_ms": 20.0, "min_latency_ms": 20.0,
+             "max_latency_ms": 20.0, "p95_latency_ms": 20.0,
+             "packet_loss_pct": 0.0, "sample_count": 5},
+            {"bucket_start": boundary - 60, "avg_latency_ms": 30.0, "min_latency_ms": 30.0,
+             "max_latency_ms": 30.0, "p95_latency_ms": 30.0,
+             "packet_loss_pct": 0.0, "sample_count": 7},
+        ])
+        stats = storage.get_range_stats(tid, start=boundary - 120, end=now)
+        # 1 raw sample + the bucket below the boundary; the bucket above it
+        # sits in the raw-covered slice and is not added on top of it.
+        assert stats["sample_count"] == 8
+        assert stats["latency_count"] == 8
+        assert stats["tiers_used"] == ["raw", "1min"]
+
+    def test_range_stats_p95_is_weighted_by_bucket_size(self, storage):
+        """p95 must weight each bucket p95 by its sample count, not count buckets."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        base = ((now - 10 * 86400) // 60) * 60
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": base, "avg_latency_ms": 10.0, "min_latency_ms": 10.0,
+             "max_latency_ms": 10.0, "p95_latency_ms": 10.0,
+             "packet_loss_pct": 0.0, "sample_count": 1000},
+            {"bucket_start": base + 60, "avg_latency_ms": 500.0, "min_latency_ms": 500.0,
+             "max_latency_ms": 500.0, "p95_latency_ms": 500.0,
+             "packet_loss_pct": 0.0, "sample_count": 10},
+        ])
+        stats = storage.get_range_stats(tid, start=base, end=base + 120)
+        # ceil(0.95 * 1010) = 960 <= 1000, so the wide bucket carries the p95;
+        # an unweighted p95 (or max) of the two bucket p95s would say 500.0.
+        assert stats["p95_latency_ms"] == 10.0
+
+    def test_range_stats_from_5min_and_1hr_buckets(self, storage):
+        """An unbounded window must reach the coarser tiers too."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        _save_buckets(storage, tid, 300, [
+            {"bucket_start": ((now - 40 * 86400) // 300) * 300,
+             "avg_latency_ms": 25.0, "min_latency_ms": 20.0, "max_latency_ms": 30.0,
+             "p95_latency_ms": 28.0, "packet_loss_pct": 0.0, "sample_count": 300},
+        ])
+        _save_buckets(storage, tid, 3600, [
+            {"bucket_start": ((now - 100 * 86400) // 3600) * 3600,
+             "avg_latency_ms": 40.0, "min_latency_ms": 35.0, "max_latency_ms": 60.0,
+             "p95_latency_ms": 55.0, "packet_loss_pct": 10.0, "sample_count": 3600},
+        ])
+        stats = storage.get_range_stats(tid)
+        assert stats["sample_count"] == 3900
+        assert stats["latency_count"] == 3540
+        assert abs(stats["avg_latency_ms"] - 137100.0 / 3540.0) < 0.001
+        assert stats["min_latency_ms"] == 20.0
+        assert stats["max_latency_ms"] == 60.0
+        assert stats["packet_loss_pct"] == 9.23
+        assert stats["p95_latency_ms"] == 55.0
+        assert stats["tiers_used"] == ["5min", "1hr"]
+
+    def test_range_stats_open_ended_window(self, storage):
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        base = ((now - 10 * 86400) // 60) * 60
+        storage.save_samples([
+            {"target_id": tid, "timestamp": now - 10, "latency_ms": 40.0, "timeout": False, "probe_method": "tcp"},
+        ])
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": base, "avg_latency_ms": 20.0, "min_latency_ms": 20.0,
+             "max_latency_ms": 20.0, "p95_latency_ms": 20.0,
+             "packet_loss_pct": 0.0, "sample_count": 9},
+        ])
+        stats = storage.get_range_stats(tid, start=base - 60, end=None)
+        assert stats["sample_count"] == 10
+        assert stats["latency_count"] == 10
+        assert stats["avg_latency_ms"] == 22.0
+        assert stats["tiers_used"] == ["raw", "1min"]
+
+    def test_range_stats_reads_raw_older_than_the_raw_tier(self, storage):
+        """Raw that aggregate() has not folded away yet must still be read."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        base = now - 10 * 86400
+        storage.save_samples([
+            {"target_id": tid, "timestamp": base, "latency_ms": 10.0, "timeout": False, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": base + 5, "latency_ms": 20.0, "timeout": False, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": base + 10, "latency_ms": 30.0, "timeout": False, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": base + 15, "latency_ms": None, "timeout": True, "probe_method": "tcp"},
+        ])
+        stats = storage.get_range_stats(tid, start=now - 30 * 86400, end=now)
+        assert stats["sample_count"] == 4
+        assert stats["latency_count"] == 3
+        assert stats["avg_latency_ms"] == 20.0
+        assert stats["packet_loss_pct"] == 25.0
+        assert stats["tiers_used"] == ["raw"]
+
+    def test_range_stats_pinned_day_uses_surviving_raw(self, storage):
+        """A pinned day keeps its raw rows, so its buckets must be skipped."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        midday = _local_midday(now - 10 * 86400)
+        storage.pin_day(datetime.fromtimestamp(midday).strftime("%Y-%m-%d"))
+        storage.save_samples([
+            {"target_id": tid, "timestamp": midday, "latency_ms": 10.0, "timeout": False, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": midday + 10, "latency_ms": 20.0, "timeout": False, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": midday + 20, "latency_ms": 30.0, "timeout": False, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": midday + 30, "latency_ms": None, "timeout": True, "probe_method": "tcp"},
+        ])
+        # aggregate() rewrites the buckets of a pinned day every cycle while
+        # its raw rows survive, so both representations exist side by side.
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": midday, "avg_latency_ms": 20.0, "min_latency_ms": 10.0,
+             "max_latency_ms": 30.0, "p95_latency_ms": 30.0,
+             "packet_loss_pct": 25.0, "sample_count": 4},
+        ])
+        stats = storage.get_range_stats(tid, start=midday - 600, end=midday + 600)
+        assert stats["sample_count"] == 4
+        assert stats["latency_count"] == 3
+        assert stats["avg_latency_ms"] == 20.0
+        assert stats["min_latency_ms"] == 10.0
+        assert stats["max_latency_ms"] == 30.0
+        assert stats["packet_loss_pct"] == 25.0
+        assert stats["p95_latency_ms"] == 30.0
+        assert stats["tiers_used"] == ["raw"]
+
+    def test_range_stats_pinned_day_not_double_counted(self, storage):
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        midday = _local_midday(now - 10 * 86400)
+        storage.pin_day(datetime.fromtimestamp(midday).strftime("%Y-%m-%d"))
+        samples = [
+            {"target_id": tid, "timestamp": midday + i * 10, "latency_ms": 20.0,
+             "timeout": False, "probe_method": "tcp"}
+            for i in range(4)
+        ]
+        samples.extend([
+            {"target_id": tid, "timestamp": now - 20, "latency_ms": 20.0, "timeout": False, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": now - 10, "latency_ms": 20.0, "timeout": False, "probe_method": "tcp"},
+        ])
+        storage.save_samples(samples)
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": midday, "avg_latency_ms": 20.0, "min_latency_ms": 20.0,
+             "max_latency_ms": 20.0, "p95_latency_ms": 20.0,
+             "packet_loss_pct": 0.0, "sample_count": 4},
+            {"bucket_start": _local_midday(now - 9 * 86400), "avg_latency_ms": 20.0,
+             "min_latency_ms": 20.0, "max_latency_ms": 20.0, "p95_latency_ms": 20.0,
+             "packet_loss_pct": 0.0, "sample_count": 50},
+        ])
+        stats = storage.get_range_stats(tid, start=now - 30 * 86400, end=now)
+        # 2 recent raw + 4 pinned raw + 50 from the one bucket that is not pinned
+        assert stats["sample_count"] == 56
+        assert stats["latency_count"] == 56
+        assert stats["tiers_used"] == ["raw", "1min"]
+
+    def test_range_stats_unpinned_day_with_surviving_raw(self, storage):
+        """Un-pinning leaves raw in place until the next aggregate() runs."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        midday = _local_midday(now - 10 * 86400)
+        date = datetime.fromtimestamp(midday).strftime("%Y-%m-%d")
+        storage.pin_day(date)
+        storage.save_samples([
+            {"target_id": tid, "timestamp": midday + i, "latency_ms": 20.0,
+             "timeout": False, "probe_method": "tcp"}
+            for i in range(20)
+        ])
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": midday, "avg_latency_ms": 20.0, "min_latency_ms": 20.0,
+             "max_latency_ms": 20.0, "p95_latency_ms": 20.0,
+             "packet_loss_pct": 0.0, "sample_count": 20},
+        ])
+        storage.unpin_day(date)
+        stats = storage.get_range_stats(tid, start=midday - 600, end=midday + 600)
+        assert stats["sample_count"] == 20
+        assert stats["latency_count"] == 20
+        assert stats["tiers_used"] == ["raw"]
+
+    def test_range_stats_pinned_date_without_surviving_raw(self, storage):
+        """Pinning a date whose raw was already pruned must not blank it out."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        midday = _local_midday(now - 10 * 86400)
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": midday, "avg_latency_ms": 20.0, "min_latency_ms": 20.0,
+             "max_latency_ms": 20.0, "p95_latency_ms": 20.0,
+             "packet_loss_pct": 0.0, "sample_count": 60},
+        ])
+        storage.pin_day(datetime.fromtimestamp(midday).strftime("%Y-%m-%d"))
+        stats = storage.get_range_stats(tid, start=midday - 600, end=midday + 600)
+        assert stats["sample_count"] == 60
+        assert stats["avg_latency_ms"] == 20.0
+        assert stats["tiers_used"] == ["1min"]
+
+    def test_range_stats_ignores_latency_of_null_avg_bucket(self, storage):
+        """A bucket without an average must not inflate the latency count."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        base = ((now - 10 * 86400) // 60) * 60
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": base, "avg_latency_ms": None, "min_latency_ms": None,
+             "max_latency_ms": None, "p95_latency_ms": None,
+             "packet_loss_pct": 50.0, "sample_count": 100},
+            {"bucket_start": base + 60, "avg_latency_ms": 20.0, "min_latency_ms": 20.0,
+             "max_latency_ms": 20.0, "p95_latency_ms": 20.0,
+             "packet_loss_pct": 0.0, "sample_count": 10},
+        ])
+        stats = storage.get_range_stats(tid, start=base, end=base + 120)
+        assert stats["sample_count"] == 110
+        assert stats["latency_count"] == 10
+        assert stats["avg_latency_ms"] == 20.0
 
 
 class TestOutages:
@@ -350,6 +658,223 @@ class TestOutages:
         storage.save_samples(samples)
         outages = storage.get_outages(tid, threshold=5)
         assert len(outages) == 0
+
+    def test_outages_from_aggregated_buckets(self, storage):
+        """Fully-lost bucket runs older than the raw retention become outages."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        base = ((now - 10 * 86400) // 60) * 60
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": base, "packet_loss_pct": 100.0, "sample_count": 6},
+            {"bucket_start": base + 60, "packet_loss_pct": 100.0, "sample_count": 6},
+            {"bucket_start": base + 120, "avg_latency_ms": 10.0, "min_latency_ms": 10.0,
+             "max_latency_ms": 10.0, "p95_latency_ms": 10.0,
+             "packet_loss_pct": 0.0, "sample_count": 60},
+            # 100% loss but too few samples to reach the threshold
+            {"bucket_start": base + 180, "packet_loss_pct": 100.0, "sample_count": 3},
+            # partial loss never counts as an outage
+            {"bucket_start": base + 240, "avg_latency_ms": 10.0, "min_latency_ms": 10.0,
+             "max_latency_ms": 10.0, "p95_latency_ms": 10.0,
+             "packet_loss_pct": 50.0, "sample_count": 60},
+        ])
+        outages = storage.get_outages(tid, threshold=5, start=base - 60, end=base + 300)
+        assert len(outages) == 1
+        assert outages[0]["start"] == base
+        assert outages[0]["end"] == base + 120
+        assert outages[0]["duration_seconds"] == 120.0
+        assert outages[0]["timeout_count"] == 12
+        assert outages[0]["approximate"] is True
+
+    def test_outages_combine_raw_and_buckets_sorted(self, storage):
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        base = ((now - 10 * 86400) // 60) * 60
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": base, "packet_loss_pct": 100.0, "sample_count": 6},
+        ])
+        samples = [{"target_id": tid, "timestamp": now - 30, "latency_ms": 10.0,
+                    "timeout": False, "probe_method": "tcp"}]
+        for i in range(6):
+            samples.append({
+                "target_id": tid, "timestamp": now - 25 + i,
+                "latency_ms": None, "timeout": True, "probe_method": "tcp",
+            })
+        samples.append({"target_id": tid, "timestamp": now - 5, "latency_ms": 10.0,
+                        "timeout": False, "probe_method": "tcp"})
+        storage.save_samples(samples)
+
+        outages = storage.get_outages(tid, threshold=5, start=base - 60, end=now)
+        assert len(outages) == 2
+        assert outages[0]["start"] < outages[1]["start"]
+        assert outages[0]["approximate"] is True
+        assert outages[0]["timeout_count"] == 6
+        # the recent outage still comes from the exact raw path
+        assert "approximate" not in outages[1]
+        assert outages[1]["timeout_count"] == 6
+
+    def test_outages_from_raw_older_than_the_raw_tier(self, storage):
+        """Raw not yet folded into buckets must still yield exact outages."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        base = now - 10 * 86400
+        samples = [{"target_id": tid, "timestamp": base, "latency_ms": 10.0,
+                    "timeout": False, "probe_method": "tcp"}]
+        for i in range(6):
+            samples.append({
+                "target_id": tid, "timestamp": base + 5 + i * 5,
+                "latency_ms": None, "timeout": True, "probe_method": "tcp",
+            })
+        samples.append({"target_id": tid, "timestamp": base + 40, "latency_ms": 10.0,
+                        "timeout": False, "probe_method": "tcp"})
+        storage.save_samples(samples)
+        outages = storage.get_outages(tid, threshold=5, start=now - 30 * 86400, end=now)
+        assert len(outages) == 1
+        assert outages[0]["timeout_count"] == 6
+        assert outages[0]["end"] == base + 40
+        assert "approximate" not in outages[0]
+
+    def test_outage_straddling_the_raw_boundary_survives_the_threshold(self, storage):
+        """Neither half reaches the threshold alone, the merged outage does."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        boundary = ((now - storage._TIER_RAW_MAX_AGE) // 60) * 60
+        # older half already aggregated: 4 timeouts in a fully lost bucket
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": boundary - 60, "packet_loss_pct": 100.0, "sample_count": 4},
+        ])
+        samples = [
+            {"target_id": tid, "timestamp": boundary + 5 + i * 5,
+             "latency_ms": None, "timeout": True, "probe_method": "tcp"}
+            for i in range(4)
+        ]
+        samples.append({"target_id": tid, "timestamp": boundary + 25, "latency_ms": 10.0,
+                        "timeout": False, "probe_method": "tcp"})
+        storage.save_samples(samples)
+        outages = storage.get_outages(tid, threshold=5, start=boundary - 120, end=now)
+        assert len(outages) == 1
+        assert outages[0]["start"] == boundary - 60
+        assert outages[0]["end"] == boundary + 25
+        assert outages[0]["timeout_count"] == 8
+        assert outages[0]["approximate"] is True
+        assert outages[0]["duration_seconds"] == 85.0
+
+    def test_outage_not_merged_with_its_own_surviving_raw(self, storage):
+        """An un-pinned day's bucket must not be added to the raw it describes."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        midday = _local_midday(now - 10 * 86400)
+        date = datetime.fromtimestamp(midday).strftime("%Y-%m-%d")
+        storage.pin_day(date)
+        storage.save_samples([
+            {"target_id": tid, "timestamp": midday + i, "latency_ms": None,
+             "timeout": True, "probe_method": "tcp"}
+            for i in range(20)
+        ])
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": midday, "packet_loss_pct": 100.0, "sample_count": 20},
+        ])
+        storage.unpin_day(date)
+        outages = storage.get_outages(tid, threshold=5, start=midday - 600, end=midday + 600)
+        assert len(outages) == 1
+        assert outages[0]["timeout_count"] == 20
+        assert "approximate" not in outages[0]
+
+    def test_outages_from_pinned_date_without_surviving_raw(self, storage):
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        midday = _local_midday(now - 10 * 86400)
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": midday, "packet_loss_pct": 100.0, "sample_count": 60},
+        ])
+        storage.pin_day(datetime.fromtimestamp(midday).strftime("%Y-%m-%d"))
+        outages = storage.get_outages(tid, threshold=5, start=midday - 600, end=midday + 600)
+        assert len(outages) == 1
+        assert outages[0]["timeout_count"] == 60
+        assert outages[0]["approximate"] is True
+
+    def test_boundary_merge_does_not_chain_into_the_next_outage(self, storage):
+        """A merged run must not swallow a second outage further along."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        boundary = ((now - storage._TIER_RAW_MAX_AGE) // 60) * 60
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": boundary - 60, "packet_loss_pct": 100.0, "sample_count": 4},
+        ])
+        samples = [
+            {"target_id": tid, "timestamp": boundary + 5 + i * 5,
+             "latency_ms": None, "timeout": True, "probe_method": "tcp"}
+            for i in range(4)
+        ]
+        # 30s of clean samples separate the two outages
+        samples.extend([
+            {"target_id": tid, "timestamp": boundary + 25 + i * 5, "latency_ms": 10.0,
+             "timeout": False, "probe_method": "tcp"}
+            for i in range(7)
+        ])
+        samples.extend([
+            {"target_id": tid, "timestamp": boundary + 60 + i * 5,
+             "latency_ms": None, "timeout": True, "probe_method": "tcp"}
+            for i in range(6)
+        ])
+        samples.append({"target_id": tid, "timestamp": boundary + 90, "latency_ms": 10.0,
+                        "timeout": False, "probe_method": "tcp"})
+        storage.save_samples(samples)
+        outages = storage.get_outages(tid, threshold=5, start=boundary - 120, end=now)
+        assert len(outages) == 2
+        assert [o["timeout_count"] for o in outages] == [8, 6]
+        assert outages[0]["approximate"] is True
+        assert "approximate" not in outages[1]
+
+    def test_ongoing_outage_survives_an_end_behind_the_server_clock(self, storage):
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        samples = [{"target_id": tid, "timestamp": now - 30, "latency_ms": 10.0,
+                    "timeout": False, "probe_method": "tcp"}]
+        for i in range(5):
+            samples.append({
+                "target_id": tid, "timestamp": now - 25 + i * 5,
+                "latency_ms": None, "timeout": True, "probe_method": "tcp",
+            })
+        storage.save_samples(samples)
+        outages = storage.get_outages(tid, threshold=5, start=now - 30 * 86400, end=now - 3)
+        assert len(outages) == 1
+        assert outages[0]["end"] is None
+        assert outages[0]["timeout_count"] == 5
+
+    def test_historical_window_ending_mid_outage_stays_open(self, storage):
+        """Same semantics as the raw-only path: rows ending mid-run stay open."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        base = now - 10 * 86400
+        samples = [{"target_id": tid, "timestamp": base, "latency_ms": 10.0,
+                    "timeout": False, "probe_method": "tcp"}]
+        for i in range(6):
+            samples.append({
+                "target_id": tid, "timestamp": base + 5 + i * 5,
+                "latency_ms": None, "timeout": True, "probe_method": "tcp",
+            })
+        storage.save_samples(samples)
+        outages = storage.get_outages(tid, threshold=5, start=base - 60, end=base + 100)
+        assert len(outages) == 1
+        assert outages[0]["end"] is None
+        assert outages[0]["duration_seconds"] == 25.0
+
+    def test_outages_do_not_merge_across_a_tier_boundary(self, storage):
+        """60s and 300s runs describe different resolutions and stay separate."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        boundary = now - storage._TIER_60S_MAX_AGE
+        _save_buckets(storage, tid, 300, [
+            {"bucket_start": boundary - 300, "packet_loss_pct": 100.0, "sample_count": 6},
+        ])
+        _save_buckets(storage, tid, 60, [
+            {"bucket_start": boundary + 60, "packet_loss_pct": 100.0, "sample_count": 6},
+        ])
+        outages = storage.get_outages(tid, threshold=5)
+        assert len(outages) == 2
+        assert [o["timeout_count"] for o in outages] == [6, 6]
+        assert outages[0]["start"] == boundary - 300
+        assert outages[1]["start"] == boundary + 60
 
 
 class TestAggregation:
