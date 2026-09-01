@@ -2,13 +2,17 @@
 
 import csv
 import io
+import math
 import os
+import random
 import subprocess
 import time
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 import pytest
 
+from app.modules.connection_monitor import routes as cm_routes
 from app.modules.connection_monitor.routes import bp
 from app.modules.connection_monitor.probe import ProbeEngine
 from app.modules.connection_monitor.storage import ConnectionMonitorStorage
@@ -427,6 +431,214 @@ class TestSamplesResolution:
         assert "packet_loss_pct" in data["samples"][0]
         assert sum(sample["sample_count"] for sample in data["samples"]) == 120
         assert {sample["bucket_seconds"] for sample in data["samples"]} == {12}
+
+
+def _frozen_clock(now):
+    """Pin the tier boundaries so repeated requests split raw/aggregated alike."""
+    return patch.object(cm_routes, "time", SimpleNamespace(time=lambda: now))
+
+
+def _seed_raw_window(storage, tid, start, end, step, seed=4242):
+    """Uneven raw traffic with duplicate latencies, timeouts and gaps."""
+    rng = random.Random(seed)
+    rows = []
+    ts = start
+    while ts < end:
+        if rng.random() < 0.02:
+            ts += rng.uniform(step, 20 * step)
+            continue
+        timeout = rng.random() < 0.06
+        rows.append({
+            "target_id": tid,
+            "timestamp": ts,
+            "latency_ms": None if timeout else rng.choice([9.5, 11.25, 11.25, 12.0, 48.75]),
+            "timeout": timeout,
+            "probe_method": "tcp",
+        })
+        ts += step * rng.uniform(0.4, 1.6)
+    storage.save_samples(rows)
+    return len(rows)
+
+
+def _seed_aggregated(storage, tid, start, end, bucket_seconds, step):
+    rows = 0
+    with storage._connect() as conn:
+        ts = start
+        while ts < end:
+            conn.execute(
+                """INSERT OR REPLACE INTO connection_samples_aggregated
+                   (target_id, bucket_start, bucket_seconds,
+                    avg_latency_ms, min_latency_ms, max_latency_ms,
+                    p95_latency_ms, packet_loss_pct, sample_count)
+                   VALUES (?, ?, ?, 15.5, 9.0, 41.0, 38.0, 1.25, 12)""",
+                (tid, ts, bucket_seconds),
+            )
+            ts += step
+            rows += 1
+    return rows
+
+
+def _assert_payload_parity(c, tid, start, end, max_points, extra=""):
+    """Assert the pre-bucketed payload equals the row-by-row one.
+
+    The SQL pre-bucketing only engages for unlimited reads, so the very same
+    request with a limit above the row count runs the untouched path and yields
+    the reference payload.
+    """
+    url = (f"/api/connection-monitor/samples/{tid}?start={start!r}&end={end!r}"
+           f"&max_points={max_points}{extra}")
+    bucketed = c.get(url + "&limit=0").get_json()
+    reference = c.get(url + "&limit=1000000").get_json()
+    assert bucketed["meta"] == reference["meta"]
+    assert len(bucketed["samples"]) == len(reference["samples"])
+    for got, want in zip(bucketed["samples"], reference["samples"]):
+        assert got.keys() == want.keys()
+        for key, value in want.items():
+            if key == "latency_ms" and value is not None:
+                # The bucket mean now leaves SQLite as a compensated SUM()
+                # instead of a running Python sum, so its last bits can move.
+                assert got[key] == pytest.approx(value, rel=1e-12)
+            else:
+                assert got[key] == value
+    return bucketed
+
+
+class TestSamplesRawTierBucketing:
+    """The raw tier is pre-bucketed in SQL without changing the payload."""
+
+    def test_raw_range_matches_row_by_row_payload(self, client):
+        c, storage = client
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = float(int(time.time()))
+        start, end = now - 7 * 86400, now
+        rows = _seed_raw_window(storage, tid, start, end, step=60)
+        assert rows > 1440
+        with _frozen_clock(now):
+            data = _assert_payload_parity(c, tid, start, end, 1440)
+            with patch.object(storage, "get_samples_bucketed") as spy:
+                c.get(f"/api/connection-monitor/samples/{tid}"
+                      f"?start={start!r}&end={end!r}&limit=0&max_points=1440")
+            assert spy.called
+        assert data["meta"]["tiers_used"] == ["raw"]
+        assert {s["bucket_seconds"] for s in data["samples"]} == {420}
+        assert sum(s["sample_count"] for s in data["samples"]) == rows
+
+    @pytest.mark.parametrize("max_points", (1000, 1440))
+    def test_blended_range_matches_row_by_row_payload(self, client, max_points):
+        c, storage = client
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = float(int(time.time()))
+        start, end = now - 30 * 86400, now
+        boundary = now - 7 * 86400
+        rows = _seed_raw_window(storage, tid, boundary, end, step=120)
+        _seed_aggregated(storage, tid, start, boundary, 60, 900)
+        # A bucket straddling the raw/60s boundary is the case where the two
+        # tiers have to merge; max_points=1000 puts the boundary inside one.
+        width = math.ceil((end - start) / max_points)
+        assert ((boundary - start) % width == 0) == (max_points == 1440)
+        with _frozen_clock(now):
+            data = _assert_payload_parity(c, tid, start, end, max_points)
+        assert data["meta"]["tiers_used"] == ["raw", "1min"]
+        assert sum(s["sample_count"] for s in data["samples"]) > rows
+
+    def test_range_without_raw_samples_matches(self, client):
+        c, storage = client
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = float(int(time.time()))
+        start, end = now - 30 * 86400, now - 20 * 86400
+        _seed_aggregated(storage, tid, start, end, 60, 300)
+        with _frozen_clock(now):
+            data = _assert_payload_parity(c, tid, start, end, 1440)
+        assert data["meta"]["tiers_used"] == ["1min"]
+
+    def test_sparse_raw_tier_stays_row_per_sample(self, client):
+        c, storage = client
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = float(int(time.time()))
+        start, end = now - 7 * 86400, now
+        storage.save_samples([
+            {"target_id": tid, "timestamp": start + i * 3000.0, "latency_ms": 10.0 + i,
+             "timeout": False, "probe_method": "tcp"}
+            for i in range(200)
+        ])
+        with _frozen_clock(now):
+            data = _assert_payload_parity(c, tid, start, end, 1440)
+        # Fewer rows than max_points: the compressor never ran, so neither
+        # should the pre-bucketing.
+        assert len(data["samples"]) == 200
+        assert {s["bucket_seconds"] for s in data["samples"]} == {None}
+
+    def test_dense_raw_in_few_buckets_still_compresses_other_tiers(self, client):
+        c, storage = client
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = float(int(time.time()))
+        start, end = now - 30 * 86400, now
+        boundary = now - 7 * 86400
+        storage.save_samples([
+            {"target_id": tid, "timestamp": boundary + i * 1.5, "latency_ms": 10.0 + (i % 7),
+             "timeout": i % 23 == 0, "probe_method": "tcp"}
+            for i in range(2000)
+        ])
+        _seed_aggregated(storage, tid, start, start + 50 * 3600, 60, 3600)
+        with _frozen_clock(now):
+            data = _assert_payload_parity(c, tid, start, end, 1440)
+        # The raw tier collapses to two buckets, so the payload looks small
+        # even though the range holds far more rows than max_points.
+        assert {s["bucket_seconds"] for s in data["samples"]} == {1800}
+
+    def test_range_shorter_than_one_bucket_matches(self, client):
+        c, storage = client
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = float(int(time.time()))
+        start, end = now - 60, now
+        _seed_raw_window(storage, tid, start, end, step=2)
+        with _frozen_clock(now):
+            data = _assert_payload_parity(c, tid, start, end, 1)
+        assert len(data["samples"]) == 1
+        assert data["samples"][0]["timestamp"] == start
+
+    def test_sub_two_second_grid_keeps_the_row_by_row_path(self, client):
+        c, storage = client
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = float(int(time.time()))
+        start, end = now - 500, now
+        rows = _seed_raw_window(storage, tid, start, end, step=0.5)
+        assert rows > 600  # the compressor still runs, on 1s buckets
+        with _frozen_clock(now), patch.object(storage, "get_samples_bucketed") as spy:
+            data = _assert_payload_parity(c, tid, start, end, 600)
+        assert not spy.called
+        assert {s["bucket_seconds"] for s in data["samples"]} == {1}
+
+    def test_p95_matches_on_a_bucket_of_duplicate_latencies(self, client):
+        c, storage = client
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = float(int(time.time()))
+        start, end = now - 400, now
+        latencies = [12.5] * 60 + [12.5] * 30 + [40.0] * 8 + [77.5] * 2
+        storage.save_samples([
+            {"target_id": tid, "timestamp": start + i, "latency_ms": latency,
+             "timeout": False, "probe_method": "tcp"}
+            for i, latency in enumerate(latencies)
+        ])
+        with _frozen_clock(now):
+            data = _assert_payload_parity(c, tid, start, end, 2)
+        # nearest-rank p95 over the first bucket: index floor(100 * 0.95) = 95
+        assert data["samples"][0]["sample_count"] == 100
+        assert data["samples"][0]["p95_latency_ms"] == 40.0
+
+    def test_pinned_day_resolution_stays_row_per_sample(self, client):
+        c, storage = client
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = float(int(time.time()))
+        start, end = now - 86400, now
+        rows = _seed_raw_window(storage, tid, start, end, step=30)
+        with patch.object(storage, "get_samples_bucketed") as spy:
+            resp = c.get(f"/api/connection-monitor/samples/{tid}"
+                         f"?resolution=raw&start={start!r}&end={end!r}&limit=0")
+        assert not spy.called
+        data = resp.get_json()
+        assert len(data["samples"]) == rows
+        assert {s["bucket_seconds"] for s in data["samples"]} == {None}
 
 
 class TestPinnedDaysAPI:

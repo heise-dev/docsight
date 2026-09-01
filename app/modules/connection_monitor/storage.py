@@ -182,6 +182,7 @@ class ConnectionMonitorStorage:
             rows = conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
 
+
     def _aggregated_sub_windows(
         self,
         start: float | None,
@@ -257,6 +258,79 @@ class ConnectionMonitorStorage:
                 params,
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def get_samples_bucketed(
+        self,
+        target_id: int,
+        start: float,
+        end: float,
+        bucket_seconds: int,
+        anchor: float,
+    ) -> list[dict]:
+        """Aggregate raw samples into fixed buckets indexed from anchor.
+
+        Lets the chart API pre-compress the raw tier in SQLite instead of
+        reading every row. Rows are shaped like get_aggregated_samples(); the
+        latency stats cover every sample that carries a latency (timeouts only
+        add to the sample count and to packet loss) and p95 is nearest-rank.
+        """
+        params = {
+            "target_id": target_id,
+            "start": start,
+            "end": end,
+            "width": bucket_seconds,
+            "anchor": anchor,
+        }
+        with self._read() as conn:
+            rows = conn.execute(
+                """
+                SELECT bucket_idx, sample_count, timeout_count, avg_latency_ms,
+                       min_latency_ms, max_latency_ms, latency_ms AS p95_latency_ms
+                FROM (
+                    SELECT bucket_idx, latency_ms,
+                           ROW_NUMBER() OVER ordered AS rn,
+                           COUNT(*) OVER whole AS sample_count,
+                           SUM(timeout) OVER whole AS timeout_count,
+                           COUNT(latency_ms) OVER whole AS latency_count,
+                           AVG(latency_ms) OVER whole AS avg_latency_ms,
+                           MIN(latency_ms) OVER whole AS min_latency_ms,
+                           MAX(latency_ms) OVER whole AS max_latency_ms
+                    FROM (
+                        SELECT CAST((timestamp - :anchor) / :width AS INTEGER) AS bucket_idx,
+                               latency_ms, timeout
+                        FROM connection_samples
+                        WHERE target_id = :target_id
+                          AND timestamp >= :start AND timestamp <= :end
+                    )
+                    WINDOW whole AS (PARTITION BY bucket_idx),
+                           ordered AS (PARTITION BY bucket_idx
+                                       ORDER BY latency_ms IS NULL, latency_ms)
+                )
+                -- one row per bucket: the nearest-rank p95 latency, which also
+                -- carries that bucket's totals. Buckets without a latency keep
+                -- their first row: p95 comes out NULL (the row's latency_ms is
+                -- NULL), the count/timeout totals stay correct.
+                WHERE rn = CAST(latency_count * 0.95 AS INTEGER) + 1
+                ORDER BY bucket_idx
+                """,
+                params,
+            ).fetchall()
+            return [
+                {
+                    "bucket_start": anchor + r["bucket_idx"] * bucket_seconds,
+                    "bucket_seconds": bucket_seconds,
+                    "avg_latency_ms": r["avg_latency_ms"],
+                    "min_latency_ms": r["min_latency_ms"],
+                    "max_latency_ms": r["max_latency_ms"],
+                    "p95_latency_ms": r["p95_latency_ms"],
+                    "packet_loss_pct": round(
+                        100.0 * r["timeout_count"] / r["sample_count"], 2
+                    ),
+                    "sample_count": r["sample_count"],
+                }
+                for r in rows
+            ]
+
 
     def get_range_stats(
         self,

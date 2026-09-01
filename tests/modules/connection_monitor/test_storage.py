@@ -1,5 +1,7 @@
 """Tests for Connection Monitor storage layer."""
 
+import math
+import random
 import sqlite3
 import time
 from datetime import datetime
@@ -171,6 +173,135 @@ class TestSamples:
         storage.save_samples(samples)
         result = storage.get_samples(tid, limit=0)
         assert len(result) == 20
+
+    def test_get_samples_limit_above_row_count_matches_unlimited(self, storage):
+        """A limit past the last row is the same read as no limit at all."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        storage.save_samples([
+            {"target_id": tid, "timestamp": now - i, "latency_ms": float(i),
+             "timeout": False, "probe_method": "tcp"}
+            for i in range(20)
+        ])
+        assert storage.get_samples(tid, limit=1000) == storage.get_samples(tid, limit=0)
+
+
+def _reference_buckets(rows, anchor, width):
+    """Bucket rows the way get_samples_bucketed is specified to."""
+    groups = {}
+    for row in rows:
+        groups.setdefault(int((row["timestamp"] - anchor) // width), []).append(row)
+    buckets = []
+    for idx in sorted(groups):
+        members = groups[idx]
+        latencies = sorted(m["latency_ms"] for m in members if m["latency_ms"] is not None)
+        timeouts = sum(1 for m in members if m["timeout"])
+        buckets.append({
+            "bucket_start": anchor + idx * width,
+            "bucket_seconds": width,
+            "avg_latency_ms": (sum(latencies) / len(latencies)) if latencies else None,
+            "min_latency_ms": latencies[0] if latencies else None,
+            "max_latency_ms": latencies[-1] if latencies else None,
+            "p95_latency_ms": latencies[math.floor(len(latencies) * 0.95)] if latencies else None,
+            "packet_loss_pct": round(100.0 * timeouts / len(members), 2),
+            "sample_count": len(members),
+        })
+    return buckets
+
+
+class TestBucketedSamples:
+    def test_matches_a_python_reference(self, storage):
+        tid = storage.create_target("Test", "1.1.1.1")
+        rng = random.Random(99)
+        anchor = 1_700_000_000.5
+        width = 37
+        rows = []
+        ts = anchor
+        while ts < anchor + 20 * width:
+            timeout = rng.random() < 0.1
+            rows.append({
+                "target_id": tid, "timestamp": ts, "probe_method": "tcp",
+                "timeout": timeout,
+                # duplicates on purpose: nearest-rank p95 must pick by value
+                "latency_ms": None if timeout else rng.choice([8.5, 8.5, 12.25, 12.25, 60.0]),
+            })
+            ts += rng.uniform(0.4, 2.5)
+        storage.save_samples(rows)
+
+        buckets = storage.get_samples_bucketed(
+            tid, start=anchor, end=ts, bucket_seconds=width, anchor=anchor,
+        )
+        expected = _reference_buckets(rows, anchor, width)
+        assert len(buckets) == len(expected)
+        for got, want in zip(buckets, expected):
+            for key, value in want.items():
+                if key == "avg_latency_ms" and value is not None:
+                    assert got[key] == pytest.approx(value)
+                else:
+                    assert got[key] == value
+
+    def test_timeout_rows_only_add_to_count_and_loss(self, storage):
+        tid = storage.create_target("Test", "1.1.1.1")
+        anchor = 1_700_000_000.0
+        storage.save_samples([
+            {"target_id": tid, "timestamp": anchor, "latency_ms": 10.0,
+             "timeout": False, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": anchor + 1, "latency_ms": None,
+             "timeout": True, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": anchor + 2, "latency_ms": 20.0,
+             "timeout": False, "probe_method": "tcp"},
+            # A timeout that still measured a latency counts towards the latency
+            # stats, exactly like the row-by-row compressor treats it.
+            {"target_id": tid, "timestamp": anchor + 3, "latency_ms": 90.0,
+             "timeout": True, "probe_method": "tcp"},
+        ])
+        bucket = storage.get_samples_bucketed(
+            tid, start=anchor, end=anchor + 10, bucket_seconds=10, anchor=anchor,
+        )[0]
+        assert bucket["sample_count"] == 4
+        assert bucket["packet_loss_pct"] == 50.0
+        assert bucket["min_latency_ms"] == 10.0
+        assert bucket["max_latency_ms"] == 90.0
+        assert bucket["avg_latency_ms"] == pytest.approx(40.0)
+
+    def test_all_timeout_bucket_has_no_latency_stats(self, storage):
+        tid = storage.create_target("Test", "1.1.1.1")
+        anchor = 1_700_000_000.0
+        storage.save_samples([
+            {"target_id": tid, "timestamp": anchor + i, "latency_ms": None,
+             "timeout": True, "probe_method": "tcp"}
+            for i in range(5)
+        ])
+        bucket = storage.get_samples_bucketed(
+            tid, start=anchor, end=anchor + 10, bucket_seconds=10, anchor=anchor,
+        )[0]
+        assert bucket["sample_count"] == 5
+        assert bucket["packet_loss_pct"] == 100.0
+        assert bucket["avg_latency_ms"] is None
+        assert bucket["min_latency_ms"] is None
+        assert bucket["max_latency_ms"] is None
+        assert bucket["p95_latency_ms"] is None
+
+    def test_buckets_are_indexed_from_the_anchor(self, storage):
+        tid = storage.create_target("Test", "1.1.1.1")
+        anchor = 1_700_000_000.25
+        storage.save_samples([
+            {"target_id": tid, "timestamp": anchor + 130 + i, "latency_ms": 5.0,
+             "timeout": False, "probe_method": "tcp"}
+            for i in range(3)
+        ])
+        buckets = storage.get_samples_bucketed(
+            tid, start=anchor + 60, end=anchor + 240, bucket_seconds=60, anchor=anchor,
+        )
+        assert [b["bucket_start"] for b in buckets] == [anchor + 120]
+        assert buckets[0]["sample_count"] == 3
+
+    def test_empty_range_returns_no_buckets(self, storage):
+        tid = storage.create_target("Test", "1.1.1.1")
+        assert storage.get_samples_bucketed(
+            tid, start=0.0, end=100.0, bucket_seconds=10, anchor=0.0,
+        ) == []
+
 
 class TestPinnedDays:
     def test_pin_day(self, storage):
