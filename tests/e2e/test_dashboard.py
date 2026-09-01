@@ -49,6 +49,24 @@ class TestNavigation:
         live_section = demo_page.locator("#view-dashboard")
         assert live_section.is_visible()
 
+    def test_switch_back_to_live_refetches_without_waiting_for_the_countdown(self, demo_page):
+        """Returning to the live view must refetch at once, not on the next 60s tick."""
+        card = demo_page.locator("#view-dashboard .metric-card").first
+        card.wait_for(state="visible")
+        demo_page.evaluate(
+            "document.querySelector('#view-dashboard .metric-card').dataset.e2eStale = '1'"
+        )
+
+        demo_page.evaluate("switchView('journal')")
+        demo_page.evaluate("switchView('live')")
+
+        # The refresh replaces #view-dashboard's innerHTML, so the marker disappears
+        # with the stale DOM. Well below the 60s countdown it would otherwise wait for.
+        demo_page.wait_for_function(
+            "() => !document.querySelector('#view-dashboard [data-e2e-stale]')",
+            timeout=5000,
+        )
+
     def test_speed_kpi_card_opens_speedtest_view_and_uses_rabbit_icon(self, demo_page):
         speed_card = demo_page.locator("#metric-speed-card")
         assert speed_card.is_visible()

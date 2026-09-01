@@ -169,6 +169,8 @@ def _open_connection_monitor_chart(page):
     page.evaluate("switchView('connection-monitor')")
     page.wait_for_selector("#view-connection-monitor.active", state="visible")
     page.wait_for_function("() => window.charts && window.charts['cm-combined-chart']")
+    # Showing the view refetches, so let that land before anything waits on a rebuild
+    page.wait_for_load_state("networkidle")
 
 
 def _reload_cm_range(page, seconds):
@@ -415,6 +417,24 @@ def test_connection_monitor_hidden_source_survives_data_refresh(demo_page):
     expect(line_toggles.nth(1)).to_have_attribute("aria-pressed", "false")
 
 
+def test_connection_monitor_switch_refetches_without_waiting_for_the_poll(demo_page):
+    """Showing the view must reload at once, not on the next 10s/60s refresh tick."""
+    page = demo_page
+    # The view builds its chart at load time while still hidden; its refresh timer
+    # only ticks while the view is active, so this instance is the stale one.
+    page.wait_for_function("() => !!charts['cm-combined-chart']")
+    page.evaluate("charts['cm-combined-chart']._e2eStale = true")
+
+    page.evaluate("switchView('connection-monitor')")
+    page.wait_for_selector("#view-connection-monitor.active", state="visible")
+
+    # Well below the 10s poll the switch would otherwise have to wait for
+    page.wait_for_function(
+        "() => charts['cm-combined-chart'] && !charts['cm-combined-chart']._e2eStale",
+        timeout=5000,
+    )
+
+
 def test_connection_monitor_hidden_source_stays_hidden_in_zoom_modal(demo_page):
     """A source hidden via the controls strip must stay hidden in the fullscreen zoom modal."""
     page = demo_page
@@ -589,6 +609,8 @@ def test_connection_monitor_live_update_does_not_cancel_an_in_progress_zoom_drag
         "() => window.charts && charts['cm-combined-chart'] && charts['cm-combined-chart'].data[0].length > 20",
         timeout=15000,
     )
+    # Showing the view refetches; drain it before the render counter goes in
+    page.wait_for_load_state("networkidle")
 
     # Silence the 10s auto-refresh and count renders so reloads can be awaited deterministically.
     page.evaluate(
