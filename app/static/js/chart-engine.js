@@ -410,6 +410,9 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
     var existing = charts[canvasId];
     // Save zoom state before potential destroy — restore after recreate
     var savedZoom = existing && existing._zoomRange ? existing._zoomRange : null;
+    // Zoom is bound to the x-domain the caller identifies — drop it when that changes
+    var xDomainKey = opts && opts.xDomainKey !== undefined ? opts.xDomainKey : null;
+    if (savedZoom && existing._docsightXDomainKey !== xDomainKey) savedZoom = null;
 
     // Fix container height before destroy to prevent scroll jump from DOM reflow
     var containerEl = document.getElementById(canvasId);
@@ -540,6 +543,10 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
     }
     if (yRange[0] !== null && yRange[1] !== null) {
         scales.y.range = function(u, dmin, dmax) {
+            /* Zoomed with a y window: show it verbatim so the visible data fills the plot */
+            if (zoomable && u._zoomRange && u._zoomRange.yMin != null) {
+                return [u._zoomRange.yMin, u._zoomRange.yMax];
+            }
             var lo = yRange[0] !== null ? yRange[0] : dmin;
             var hi = yRange[1] !== null ? yRange[1] : dmax;
             if (dmin < lo) lo = dmin;
@@ -688,11 +695,13 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
     charts[canvasId] = chart;
     chart._docsightXEdgePadding = xEdgePadding;
     chart._docsightParams = {labels: labels, datasets: datasets, type: type, zones: zones, opts: opts};
+    chart._docsightXDomainKey = xDomainKey;
 
     /* Restore zoom state from previous chart instance (survives destroy/recreate) */
     if (savedZoom && zoomable) {
         chart._zoomRange = savedZoom;
         chart.setScale('x', savedZoom);
+        if (savedZoom.yMin != null) chart.setScale('y', { min: savedZoom.yMin, max: savedZoom.yMax });
     }
 
     /* Release fixed container height after chart is rendered */
