@@ -557,6 +557,8 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
     if (opts && opts.yMax !== undefined) yRange[1] = opts.yMax;
 
     var zoomable = opts && opts.zoomable;
+    /* Opt-in: keep the caller's yMax even when the data exceeds it (clipped spikes) */
+    var yMaxStrict = !!(opts && opts.yMaxStrict);
     var scales = {
         x: { time: false },
         y: {}
@@ -584,7 +586,7 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
             var lo = yRange[0] !== null ? yRange[0] : dmin;
             var hi = yRange[1] !== null ? yRange[1] : dmax;
             if (dmin < lo) lo = dmin;
-            if (dmax > hi) hi = dmax;
+            if (dmax > hi && !yMaxStrict) hi = dmax;
             return [lo, hi];
         };
     }
@@ -721,7 +723,8 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
         axes: axes,
         series: uSeries,
         cursor: cursor,
-        legend: { show: allDatasets.length + (hasTemp ? 1 : 0) > 1, live: false },
+        /* opts.legend:false suppresses the built-in legend for callers that ship their own */
+        legend: { show: !(opts && opts.legend === false) && allDatasets.length + (hasTemp ? 1 : 0) > 1, live: false },
         plugins: plugins
     };
 
