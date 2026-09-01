@@ -392,6 +392,15 @@
     font-size: 0.72rem;
 }
 
+.cm-zoom-window {
+    display: none;
+    margin-right: auto;
+    color: var(--accent);
+    font-size: 0.75rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
 .cm-resolution {
     display: none;
     color: var(--text-muted);
