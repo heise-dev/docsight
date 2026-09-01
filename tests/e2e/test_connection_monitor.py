@@ -69,3 +69,83 @@ def test_connection_monitor_mobile_surfaces_raw_ping_log_without_deep_scroll(dem
     assert 0 <= button_box["y"]
     assert panel_box["y"] < chart_box["y"], "raw log panel should appear before the long chart stack"
     assert button_box["y"] + button_box["height"] <= 844, "raw log download actions should be fully visible without deep mobile scrolling"
+
+
+def test_connection_monitor_live_update_does_not_cancel_an_in_progress_zoom_drag(demo_page):
+    """A poll landing mid-drag must not destroy the chart and wipe the zoom selection."""
+    page = demo_page
+    page.evaluate("switchView('connection-monitor')")
+    page.wait_for_selector("#view-connection-monitor.active", state="visible")
+    page.wait_for_function(
+        "() => window.charts && charts['cm-combined-chart'] && charts['cm-combined-chart'].data[0].length > 20",
+        timeout=15000,
+    )
+
+    # Silence the 10s auto-refresh and count renders so reloads can be awaited deterministically.
+    page.evaluate(
+        """() => {
+            const probe = setInterval(() => {}, 1e6);
+            for (let i = 1; i <= probe; i++) clearInterval(i);
+            window._e2eRenders = 0;
+            const orig = window.renderChart;
+            window.renderChart = function(canvasId) {
+                if (canvasId === 'cm-combined-chart') window._e2eRenders++;
+                return orig.apply(null, arguments);
+            };
+        }"""
+    )
+
+    def reload_chart():
+        renders = page.evaluate("() => window._e2eRenders")
+        page.evaluate(
+            """() => {
+                const btn = document.querySelector('#view-connection-monitor [data-cm-range].active');
+                window.cmSetRange(btn, Number(btn.dataset.cmRange));
+            }"""
+        )
+        page.wait_for_function("(n) => window._e2eRenders > n", arg=renders, timeout=15000)
+
+    geom = page.evaluate(
+        """() => {
+            const u = charts['cm-combined-chart'];
+            const rect = u.over.getBoundingClientRect();
+            const last = u.data[0].length - 1;
+            return {
+                x1: rect.left + u.valToPos(Math.round(last * 0.2), 'x'),
+                x2: rect.left + u.valToPos(Math.round(last * 0.6), 'x'),
+                y: rect.top + rect.height / 2
+            };
+        }"""
+    )
+
+    page.mouse.move(geom["x1"], geom["y"])
+    page.mouse.down()
+    page.mouse.move(geom["x2"], geom["y"], steps=5)
+    page.evaluate("() => { charts['cm-combined-chart']._e2eStale = true; }")
+    assert page.evaluate("() => charts['cm-combined-chart'].select.width") > 0
+
+    reload_chart()
+    assert page.evaluate("() => charts['cm-combined-chart']._e2eStale === true") is True, (
+        "live update rebuilt the chart while a zoom drag was in flight"
+    )
+    assert page.evaluate("() => charts['cm-combined-chart'].select.width") > 0
+
+    page.mouse.up()
+    assert page.evaluate("() => charts['cm-combined-chart']._zoomRange != null") is True
+
+    # Recovery: with no drag in flight the very next update rebuilds as before.
+    reload_chart()
+    assert page.evaluate("() => charts['cm-combined-chart']._e2eStale === undefined") is True
+
+    # Recovery bound: a drag that never ends may delay a rebuild, never block it forever.
+    page.evaluate("() => { charts['cm-combined-chart']._e2eStale = true; }")
+    page.mouse.move(geom["x1"], geom["y"])
+    page.mouse.down()
+    page.mouse.move(geom["x2"], geom["y"], steps=5)
+    assert page.evaluate("() => charts['cm-combined-chart'].select.width") > 0
+    for _ in range(3):
+        reload_chart()
+    page.mouse.up()
+    assert page.evaluate("() => charts['cm-combined-chart']._e2eStale === undefined") is True, (
+        "a stuck drag selection must not block chart rebuilds indefinitely"
+    )
