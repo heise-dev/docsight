@@ -85,7 +85,7 @@ def _requested_window(url):
 
 def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned_days=None,
                                  state=None, interval=60, meta=None, target_metas=None,
-                                 band_max=None, loss_index=None):
+                                 band_max=None, loss_index=None, stats=None, outages=None):
     """Serve deterministic Connection Monitor data: one target, one latency outlier.
 
     Samples are served only inside the requested window, so a fetch that narrows
@@ -96,7 +96,9 @@ def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned
     answer depends on the resolution asked for. ``target_metas`` instead serves
     one target per entry, each with its own envelope meta. ``band_max`` adds
     per-bucket min/max so the chart draws a min/max band, and ``loss_index``
-    marks one sample as fully lost so the loss markers are drawn.
+    marks one sample as fully lost so the loss markers are drawn. ``stats``
+    serves the range-stats payload (keyed by target id as a string) and
+    ``outages`` the outage list; both keep their empty defaults when omitted.
     """
     now = int(time.time())
     samples = [
@@ -147,6 +149,10 @@ def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned
             else:
                 served_meta = meta or {"resolution": "raw"}
             route.fulfill(json={"meta": served_meta, "samples": served})
+        elif "/stats" in url and stats is not None:
+            route.fulfill(json=stats)
+        elif "/outages/" in url and outages is not None:
+            route.fulfill(json=outages)
         elif "/capability" in url:
             route.fulfill(json={"method": "icmp"})
         else:
@@ -990,3 +996,59 @@ def test_connection_monitor_pinned_day_indicator_reports_the_served_tier(demo_pa
 
     _rezoom_cm_chart(page, 60, 120)
     expect(indicator).to_have_text(f"Pinned: {pinned_date} (1-min averages)")
+
+
+def test_connection_monitor_stats_mark_bucket_derived_targets(demo_page):
+    """Stats served from aggregated buckets must be marked approximate, per target."""
+    page = demo_page
+    raw_meta = {"resolution": "raw", "bucket_seconds": None, "blended": False,
+                "mixed": False, "tiers_used": ["raw"]}
+    _stub_connection_monitor_api(
+        page,
+        target_metas=[raw_meta, raw_meta],
+        stats={
+            "1": {"sample_count": 100, "latency_count": 100, "min_latency_ms": 10.0,
+                  "max_latency_ms": 90.0, "avg_latency_ms": 40.0, "p95_latency_ms": 80.0,
+                  "packet_loss_pct": 0.0, "tiers_used": ["1hr"]},
+            "2": {"sample_count": 100, "latency_count": 100, "min_latency_ms": 12.0,
+                  "max_latency_ms": 92.0, "avg_latency_ms": 42.0, "p95_latency_ms": 82.0,
+                  "packet_loss_pct": 0.0, "tiers_used": ["raw"]},
+        },
+    )
+    _open_connection_monitor_chart(page)
+
+    # The combined cards blend both targets, so the bucket-derived one taints them
+    marked_cards = page.locator("#cm-stats-cards .cm-kpi-card:has(.cm-approx) .cm-kpi-label")
+    expect(marked_cards).to_have_text(["Avg Latency", "P95"])
+    assert "biased high" in page.locator(
+        "#cm-stats-cards .cm-approx"
+    ).first.get_attribute("title").lower()
+
+    rows = page.locator("#cm-per-target-stats tbody tr")
+    expect(rows).to_have_count(2)
+    expect(rows.nth(0).locator(".cm-approx")).to_have_count(2)
+    expect(rows.nth(1).locator(".cm-approx")).to_have_count(0)
+
+
+def test_connection_monitor_outage_rows_mark_bucket_derived_windows(demo_page):
+    """A bucket-derived outage is minute-snapped, so its row carries the marker."""
+    page = demo_page
+    now = int(time.time())
+    _stub_connection_monitor_api(
+        page,
+        outages=[
+            {"start": now - 3600, "end": now - 3300, "duration_seconds": 300.0,
+             "timeout_count": 60, "approximate": True},
+            {"start": now - 900, "end": now - 880, "duration_seconds": 20.0,
+             "timeout_count": 20},
+        ],
+    )
+    _open_connection_monitor_chart(page)
+
+    rows = page.locator("#cm-outage-tbody tr")
+    expect(rows).to_have_count(2)
+    # Newest first: the exact raw outage leads, the bucket-derived one follows
+    expect(rows.nth(0).locator(".cm-approx")).to_have_count(0)
+    marker = rows.nth(1).locator("td").nth(1).locator(".cm-approx")
+    expect(marker).to_have_count(1)
+    assert "minute-snapped" in marker.get_attribute("title").lower()

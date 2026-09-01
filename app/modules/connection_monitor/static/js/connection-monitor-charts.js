@@ -641,6 +641,22 @@ var CMCharts = (function() {
         return 'ok';
     }
 
+    // Range stats served from the 60s/300s/3600s buckets are derived, not exact -
+    // p95 in particular is biased HIGH (see storage.get_range_stats). tiers_used
+    // names the tiers that actually contributed, so anything but pure raw is marked.
+    function isApproximateStats(stats) {
+        var tiers = stats && Array.isArray(stats.tiers_used) ? stats.tiers_used : [];
+        return tiers.some(function(tier) { return tier !== 'raw'; });
+    }
+
+    function appendApproxMarker(el, title) {
+        var mark = document.createElement('span');
+        mark.className = 'cm-approx';
+        mark.textContent = '≈';
+        mark.title = title;
+        el.appendChild(mark);
+    }
+
     /**
      * Render stats cards (min/max/avg latency, packet loss) from sample data.
      */
@@ -727,12 +743,15 @@ var CMCharts = (function() {
 
         if (avg == null || min == null || max == null) return;
         var lossPct = totalSamples > 0 ? (totalTimeouts / totalSamples * 100) : 0;
+        // The cards blend every target, so one approximate target taints them all
+        var approximate = allTargetData.some(function(td) { return isApproximateStats(td.stats); });
+        var approxTitle = container.dataset.lApprox || 'Approximate: derived from aggregated buckets, not raw samples. P95 is biased high.';
 
         var cards = [
-            { label: 'Avg Latency', value: avg.toFixed(1) + ' ms', color: avg < 30 ? 'var(--good)' : avg < 100 ? 'var(--warn, orange)' : 'var(--crit)' },
+            { label: 'Avg Latency', value: avg.toFixed(1) + ' ms', color: avg < 30 ? 'var(--good)' : avg < 100 ? 'var(--warn, orange)' : 'var(--crit)', approximate: approximate },
             { label: 'Min', value: min.toFixed(1) + ' ms', color: 'var(--text-muted)' },
             { label: 'Max', value: max.toFixed(1) + ' ms', color: max > 100 ? 'var(--crit)' : 'var(--text-muted)' },
-            { label: 'P95', value: p95 != null ? p95.toFixed(1) + ' ms' : '-', color: p95 != null && p95 > 100 ? 'var(--warn, orange)' : 'var(--text-muted)' },
+            { label: 'P95', value: p95 != null ? p95.toFixed(1) + ' ms' : '-', color: p95 != null && p95 > 100 ? 'var(--warn, orange)' : 'var(--text-muted)', approximate: approximate },
             { label: 'Packet Loss', value: lossPct.toFixed(2) + '%', color: lossPct > 2 ? 'var(--crit)' : lossPct > 0 ? 'var(--warn, orange)' : 'var(--good)' },
             { label: 'Samples', value: totalSamples.toLocaleString(), color: 'var(--text-muted)' }
         ];
@@ -744,6 +763,7 @@ var CMCharts = (function() {
             val.className = 'cm-kpi-value';
             val.style.setProperty('--cm-kpi-color', c.color);
             val.textContent = c.value;
+            if (c.approximate) appendApproxMarker(val, approxTitle);
             var lbl = document.createElement('div');
             lbl.className = 'cm-kpi-label';
             lbl.textContent = c.label;
@@ -781,6 +801,7 @@ var CMCharts = (function() {
         var lSamples = container.dataset.lSamples || 'Samples';
         var lDiagExt = container.dataset.diagExternal || 'External issue - gateway OK but external targets show packet loss';
         var lDiagInt = container.dataset.diagInternal || 'Internal/ISP issue - gateway also affected';
+        var lApprox = container.dataset.lApprox || 'Approximate: derived from aggregated buckets, not raw samples. P95 is biased high.';
 
         // Calculate per-target stats using weighted computation
         var stats = allTargetData.map(function(td, tIdx) {
@@ -822,7 +843,8 @@ var CMCharts = (function() {
                 p95: p95,
                 loss: loss,
                 samples: totalSamples,
-                isLocal: isPrivateIP(td.target.host)
+                isLocal: isPrivateIP(td.target.host),
+                approximate: isApproximateStats(td.stats)
             };
         });
 
@@ -864,10 +886,12 @@ var CMCharts = (function() {
             var tdAvg = document.createElement('td');
             tdAvg.dataset.label = lAvg;
             tdAvg.textContent = s.avg != null ? s.avg.toFixed(1) + ' ms' : '-';
+            if (s.approximate) appendApproxMarker(tdAvg, lApprox);
 
             var tdP95 = document.createElement('td');
             tdP95.dataset.label = lP95;
             tdP95.textContent = s.p95 != null ? s.p95.toFixed(1) + ' ms' : '-';
+            if (s.approximate) appendApproxMarker(tdP95, lApprox);
 
             // Packet Loss with color
             var tdLoss = document.createElement('td');

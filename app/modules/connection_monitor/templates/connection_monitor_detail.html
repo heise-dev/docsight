@@ -54,7 +54,9 @@
         <span>{{ t.get('docsight.connection_monitor.cm_no_data', 'No data yet. Enable the Connection Monitor in settings to start collecting.') }}</span>
     </div>
 
-    <div id="cm-stats-cards" class="cm-stats-grid"></div>
+    <div id="cm-stats-cards" class="cm-stats-grid"
+         data-l-approx="{{ t.get('docsight.connection_monitor.cm_approx_stats', 'Approximate: derived from aggregated buckets, not raw samples. P95 is biased high.') }}"
+    ></div>
 
     <div id="cm-charts-section" class="cm-workspace">
         <section class="glass cm-panel cm-chart-panel">
@@ -101,6 +103,7 @@
                      data-l-samples="{{ t.get('docsight.connection_monitor.cm_per_target_samples', 'Samples') }}"
                      data-diag-external="{{ t.get('docsight.connection_monitor.cm_diag_external', 'External issue - gateway OK but external targets show packet loss') }}"
                      data-diag-internal="{{ t.get('docsight.connection_monitor.cm_diag_internal', 'Internal/ISP issue - gateway also affected') }}"
+                     data-l-approx="{{ t.get('docsight.connection_monitor.cm_approx_stats', 'Approximate: derived from aggregated buckets, not raw samples. P95 is biased high.') }}"
                 ></div>
             </section>
 
@@ -148,7 +151,9 @@
                             <th class="text-right">{{ t.get('docsight.connection_monitor.cm_outage_duration', 'Duration') }}</th>
                         </tr>
                     </thead>
-                    <tbody id="cm-outage-tbody"></tbody>
+                    <tbody id="cm-outage-tbody"
+                           data-l-approx="{{ t.get('docsight.connection_monitor.cm_approx_outage', 'Minute-snapped, derived from aggregated buckets.') }}"
+                    ></tbody>
                 </table>
             </div>
         </section>
