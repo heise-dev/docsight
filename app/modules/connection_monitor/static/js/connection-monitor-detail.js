@@ -508,6 +508,8 @@
                     if (o.end && g.end && o.end > g.end) g.end = o.end;
                     if (!o.end) g.end = null;
                     g.duration = Math.max(g.duration || 0, o.duration_seconds || 0);
+                    // One bucket-derived member makes the whole group inexact
+                    g.approximate = g.approximate || !!o.approximate;
                     merged = true;
                     break;
                 }
@@ -518,11 +520,13 @@
                     start: o.start,
                     end: o.end,
                     duration: o.duration_seconds || 0,
-                    ongoing: !o.end
+                    ongoing: !o.end,
+                    approximate: !!o.approximate
                 });
             }
         });
         grouped.sort(function(a, b) { return (b.start || 0) - (a.start || 0); });
+        var approxTitle = tbody.dataset.lApprox || 'Minute-snapped, derived from aggregated buckets.';
 
         tbody.textContent = '';
 
@@ -545,6 +549,15 @@
 
             var tdStart = document.createElement('td');
             tdStart.textContent = new Date(g.start * 1000).toLocaleString();
+            if (g.approximate) {
+                // Bucket-derived outages are snapped to the bucket grid, so the
+                // start/end shown are not the real transition times
+                var mark = document.createElement('span');
+                mark.className = 'cm-approx';
+                mark.textContent = '≈';
+                mark.title = approxTitle;
+                tdStart.appendChild(mark);
+            }
 
             var tdEnd = document.createElement('td');
             if (g.ongoing) {
