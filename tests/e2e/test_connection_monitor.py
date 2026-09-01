@@ -116,7 +116,13 @@ def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned
             if window is not None:
                 served = [s for s in samples if window[0] <= s["timestamp"] <= window[1]]
             if state is not None:
-                state["requests"].append({"start": window[0], "end": window[1], "url": url})
+                params = parse_qs(urlparse(url).query)
+                state["requests"].append({
+                    "start": window[0],
+                    "end": window[1],
+                    "max_points": int(params["max_points"][0]) if "max_points" in params else None,
+                    "url": url,
+                })
             route.fulfill(json={"meta": {"resolution": "raw"}, "samples": served})
         elif "/capability" in url:
             route.fulfill(json={"method": "icmp"})
@@ -163,6 +169,25 @@ def _zoom_cm_chart(page, first_index, last_index):
     )
 
 
+def _hold_next_cm_samples_response(page, ms):
+    """Hold the next /samples/ response back, so the state before it lands is observable."""
+    page.evaluate(
+        """(ms) => {
+            const original = window.fetch;
+            let armed = true;
+            window.fetch = function() {
+                const pending = original.apply(this, arguments);
+                if (armed && String(arguments[0]).includes('/samples/')) {
+                    armed = false;
+                    return pending.then(r => new Promise(done => setTimeout(() => done(r), ms)));
+                }
+                return pending;
+            };
+        }""",
+        ms,
+    )
+
+
 def _rezoom_cm_chart(page, first_index, last_index):
     """Drag-select a window and wait for the refetch it triggers to rebuild the chart.
 
@@ -202,8 +227,20 @@ def test_connection_monitor_zoom_rescales_y_axis(demo_page):
     full = _cm_scales(page)
     assert full["yMax"] > 900, "unzoomed y-axis should still cover the 1000 ms outlier"
 
-    preview = _rezoom_cm_chart(page, sample_count // 2, sample_count - 1)
+    # Hold the refetch back so the instant preview can be observed on its own
+    page.evaluate("() => { window.charts['cm-combined-chart']._e2eStale = true; }")
+    _hold_next_cm_samples_response(page, 3000)
+    preview = _zoom_cm_chart(page, sample_count // 2, sample_count - 1)
     assert preview["yMax"] < 100, "the drag should pick a low y window immediately, before the refetch"
+    page.wait_for_function(
+        "() => window.charts['cm-combined-chart'].scales.y.max < 100", timeout=2500
+    )
+    assert page.evaluate("() => !!window.charts['cm-combined-chart']._e2eStale"), (
+        "the preview y window must be applied to the live chart before the refetch lands"
+    )
+    page.wait_for_function(
+        "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._e2eStale"
+    )
 
     zoomed = _cm_scales(page)
     assert zoomed["yMax"] < 100, "zoomed y-axis should rescale to the visible ~50 ms samples"
@@ -436,6 +473,10 @@ def test_connection_monitor_zoom_refetches_the_selected_window(demo_page):
     window = state["requests"][-1]
     assert abs(window["start"] - stamps[60]) <= 10, "refetch should start at the selected sample"
     assert abs(window["end"] - stamps[120]) <= 10, "refetch should end at the selected sample"
+    # A sub-24h window must still be capped: uncapped raw pings over hours are a
+    # far heavier payload than the range the user zoomed out of
+    assert window["max_points"] is not None, "a zoom window must ask for a bounded payload"
+    assert window["max_points"] <= 1440, "a zoom window must ask for a bounded payload"
 
     zoomed = _cm_scales(page)
     assert zoomed["points"] < sample_count, "the refetched chart should only hold the window's samples"
@@ -448,6 +489,37 @@ def test_connection_monitor_zoom_refetches_the_selected_window(demo_page):
     assert abs(nested["start"] - stamps[70]) <= 10, "a nested zoom should narrow from the current window"
     assert abs(nested["end"] - stamps[90]) <= 10, "a nested zoom should narrow from the current window"
     assert nested["start"] > window["start"] and nested["end"] < window["end"]
+
+
+def test_connection_monitor_second_zoom_wins_over_a_slower_first_response(demo_page):
+    """A drag while the previous drag's fetch is in flight must not be overwritten by it."""
+    page = demo_page
+    state = {}
+    _stub_connection_monitor_api(page, state=state)
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+
+    stamps = state["timestamps"]
+    page.evaluate("() => { window.charts['cm-combined-chart']._e2eStale = true; }")
+    _hold_next_cm_samples_response(page, 3000)
+    _zoom_cm_chart(page, 60, 120)  # first drag: its response is held back
+    _zoom_cm_chart(page, 10, 40)   # second drag while the first is still in flight
+
+    # The second window resolves first and owns the view
+    page.wait_for_function(
+        "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._e2eStale"
+    )
+    second = state["requests"][-1]
+    assert abs(second["start"] - stamps[10]) <= 10, "the second drag should be the one fetched last"
+    assert abs(second["end"] - stamps[40]) <= 10, "the second drag should be the one fetched last"
+
+    # ...and the first, slower response must be discarded rather than rebuild the chart.
+    # Nothing else can correct it: a fixed zoom window stops the refresh timer.
+    page.evaluate("() => { window.charts['cm-combined-chart']._e2eStale = true; }")
+    page.wait_for_timeout(4000)
+    assert page.evaluate("() => !!window.charts['cm-combined-chart']._e2eStale"), (
+        "the overtaken response must not rebuild the chart onto the abandoned window"
+    )
 
 
 def test_connection_monitor_zoom_at_the_live_edge_follows_new_samples(demo_page):
