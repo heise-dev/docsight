@@ -418,6 +418,7 @@
                 renderExportLinks();
                 renderRawLogLinks();
                 renderResolutionIndicator(meta);
+                renderZoomWindowLabel(start, end);
                 setChartLoading(false);
             })
             .catch(function() {
@@ -581,6 +582,30 @@
         el.style.display = 'block';
     }
 
+    function formatZoomBound(ts, withDate) {
+        var d = new Date(ts * 1000);
+        function pad(n) { return String(n).padStart(2, '0'); }
+        var hhmm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+        return withDate ? pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + '. ' + hhmm : hhmm;
+    }
+
+    // The x axis of a zoom window only carries clock times, so a 3-minute slice of
+    // last week looks exactly like one from today — name the window above the chart.
+    // Takes the bounds the fetch actually used: a followLive window moves with now,
+    // so asking getZoomWindow() again could label the chart ahead of its own data.
+    function renderZoomWindowLabel(start, end) {
+        var el = document.getElementById('cm-zoom-window');
+        if (!el) return;
+        if (!zoomWindow) {
+            el.textContent = '';
+            el.style.display = 'none';
+            return;
+        }
+        var sameDay = new Date(start * 1000).toDateString() === new Date(end * 1000).toDateString();
+        el.textContent = formatZoomBound(start, true) + ' – ' + formatZoomBound(end, !sameDay);
+        el.style.display = 'block';
+    }
+
     function showNoData() {
         var noData = document.getElementById('cm-no-data');
         var chartsEl = document.getElementById('cm-charts-section');
@@ -593,11 +618,12 @@
         var rawLogLinks = document.getElementById('cm-raw-log-links');
         var rawLogPanel = document.getElementById('cm-raw-log-panel');
         var resolutionEl = document.getElementById('cm-resolution-indicator');
+        var zoomWindowEl = document.getElementById('cm-zoom-window');
         if (noData) noData.style.display = 'flex';
         if (chartsEl) chartsEl.style.display = 'none';
         if (outagePanel) outagePanel.style.display = 'none';
         if (rawLogPanel) rawLogPanel.style.display = 'none';
-        [statsEl, perTargetEl, outageBody, exportLinks, rawLogLinks, resolutionEl].forEach(function(el) {
+        [statsEl, perTargetEl, outageBody, exportLinks, rawLogLinks, resolutionEl, zoomWindowEl].forEach(function(el) {
             if (el) el.textContent = '';
         });
         if (availabilityEl) {
@@ -606,6 +632,7 @@
             availabilityEl.removeAttribute('aria-label');
         }
         if (resolutionEl) resolutionEl.style.display = 'none';
+        if (zoomWindowEl) zoomWindowEl.style.display = 'none';
     }
 
     function hideNoData() {

@@ -1,5 +1,6 @@
 """E2E coverage for Connection Monitor workflows."""
 
+import re
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -82,17 +83,19 @@ def _requested_window(url):
     return float(params["start"][0]), float(params["end"][0])
 
 
-def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned_days=None, state=None):
+def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned_days=None, state=None,
+                                 interval=60):
     """Serve deterministic Connection Monitor data: one target, one latency outlier.
 
     Samples are served only inside the requested window, so a fetch that narrows
     the window visibly narrows the chart. Pass ``state`` to collect the sample
-    timestamps and every requested window.
+    timestamps and every requested window, or ``interval`` to space the samples
+    closer than a minute apart.
     """
     now = int(time.time())
     samples = [
         {
-            "timestamp": now - (sample_count - i) * 60,
+            "timestamp": now - (sample_count - i) * interval,
             "latency_ms": 1000.0 if i == outlier_index else 50.0 + (i % 5),
             "packet_loss_pct": 0,
             "sample_count": 1,
@@ -199,6 +202,17 @@ def _rezoom_cm_chart(page, first_index, last_index):
         "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._e2eStale"
     )
     return preview
+
+
+def _cm_x_axis_labels(page):
+    """The tick labels the x axis renders (uPlot draws them on canvas, not into the DOM)."""
+    return page.evaluate(
+        """() => {
+            const u = window.charts['cm-combined-chart'];
+            const ax = u.axes[0];
+            return ax.values(u, ax.splits(u));
+        }"""
+    )
 
 
 def _cm_scales(page):
@@ -650,3 +664,45 @@ def test_connection_monitor_user_refetch_shows_a_loading_state_but_a_poll_does_n
     assert page.evaluate("() => window._cmLoadingShown") == 0, (
         "a background poll must not flash the loading state"
     )
+
+
+def test_connection_monitor_sub_minute_zoom_labels_the_axis_with_seconds(demo_page):
+    """A zoom window shorter than a minute must not print the same hh:mm on every tick."""
+    page = demo_page
+    _stub_connection_monitor_api(page, interval=5)
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+
+    full = _cm_x_axis_labels(page)
+    assert all(re.fullmatch(r"\d\d:\d\d", label) for label in full), full
+
+    _rezoom_cm_chart(page, 100, 108)  # ~40 s of samples
+    zoomed = _cm_x_axis_labels(page)
+    assert len(zoomed) > 1, zoomed
+    assert all(re.fullmatch(r"\d\d:\d\d:\d\d", label) for label in zoomed), zoomed
+    assert len(set(zoomed)) == len(zoomed), "every tick of a sub-minute window must read differently"
+
+
+def test_connection_monitor_zoom_window_header_names_the_zoomed_window(demo_page):
+    """A zoom drops the date from the axis, so the window itself has to be labelled."""
+    page = demo_page
+    _stub_connection_monitor_api(page, interval=5)
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+
+    header = page.locator("#cm-zoom-window")
+    expect(header).to_be_hidden()
+
+    _rezoom_cm_chart(page, 100, 108)
+    expect(header).to_be_visible()
+    # The end bound repeats the date only when the window straddles midnight
+    assert re.fullmatch(
+        r"\d\d\.\d\d\. \d\d:\d\d \u2013 (\d\d\.\d\d\. )?\d\d:\d\d", header.inner_text().strip()
+    ), header.inner_text()
+
+    page.evaluate("() => { window.charts['cm-combined-chart']._e2eStale = true; }")
+    page.locator("#cm-combined-chart button", has_text="Reset Zoom").click()
+    page.wait_for_function(
+        "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._e2eStale"
+    )
+    expect(header).to_be_hidden()

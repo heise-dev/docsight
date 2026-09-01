@@ -78,6 +78,9 @@ function docsightFormatXAxisLabel(ts, range) {
     if (String(range || '').toLowerCase() === 'bqm') return hhmm;
     var mmdd = pad(d.getMonth() + 1) + '-' + pad(d.getDate());
     var hours = docsightRangeHours(range);
+    // A zoom window can be shorter than the gap between two hh:mm ticks, which
+    // would print the same label on every tick — show seconds instead
+    if (hours > 0 && hours < 0.25) return hhmm + ':' + pad(d.getSeconds());
     if (hours <= 24) return hhmm;
     if (hours < 24 * 30) return mmdd + ' ' + hhmm;
     return mmdd;
