@@ -557,6 +557,8 @@ var CMCharts = (function() {
             // Only a clipped ceiling may stay below the data; otherwise widen as before
             yMaxStrict: ceiling < dataMax,
             xDomainKey: domainKey !== undefined && domainKey !== null ? domainKey : axisRange,
+            // The one-line labels need ~19px, not uPlot's default 50px reserve
+            xAxisSize: 24,
             minHeight: 260,
             maxHeight: 440,
             heightRatio: 0.42,
