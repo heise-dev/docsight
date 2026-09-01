@@ -414,6 +414,15 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
     var xDomainKey = opts && opts.xDomainKey !== undefined ? opts.xDomainKey : null;
     if (savedZoom && existing._docsightXDomainKey !== xDomainKey) savedZoom = null;
 
+    // Save legend visibility (uPlot keeps series[i].show in sync) so toggled-off
+    // sources stay hidden across the destroy/recreate on every data refresh
+    var savedShow = {};
+    if (existing && existing.series) {
+        for (var si = 1; si < existing.series.length; si++) {
+            savedShow[existing.series[si].label] = existing.series[si].show;
+        }
+    }
+
     // Fix container height before destroy to prevent scroll jump from DOM reflow
     var containerEl = document.getElementById(canvasId);
     var savedHeight = 0;
@@ -459,6 +468,10 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
     allDatasets.forEach(function(ds) {
         var showPoints = ds.showPoints;
         if (showPoints === undefined) showPoints = n <= 30 && !isBar;
+        var show = ds.show;
+        if (show === undefined) {
+            show = Object.prototype.hasOwnProperty.call(savedShow, ds.label) ? savedShow[ds.label] : true;
+        }
         var s = {
             label: ds.label,
             stroke: ds.color || 'rgba(168,85,247,0.9)',
@@ -466,7 +479,7 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
             fill: isBar ? (ds.color || '#a855f7') + 'cc' : (ds.fill || undefined),
             points: { show: showPoints, size: ds.pointSize || 6 },
             spanGaps: ds.spanGaps !== undefined ? ds.spanGaps : false,
-            show: ds.show !== undefined ? ds.show : true,
+            show: show,
         };
         if (ds.fillTo !== undefined && ds.fillTo !== null) s.fillTo = ds.fillTo;
         if (ds.scale) s.scale = ds.scale;

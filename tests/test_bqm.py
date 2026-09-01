@@ -14,6 +14,7 @@ from app.module_loader import ModuleInfo
 from app.storage import SnapshotStorage
 from app.config import ConfigManager
 from app.runtime import current_runtime
+from app.tz import get_tz_name, local_today
 
 
 # ── Fetcher Tests ──
@@ -380,7 +381,7 @@ def bqm_api_storage(tmp_path, sample_png, sample_csv_rows):
     db_path = str(tmp_path / "bqm_api.db")
     s = SnapshotStorage(db_path, max_days=7)
     bs = BqmStorage(db_path)
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = local_today(get_tz_name())
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             "INSERT INTO bqm_graphs (date, timestamp, image_blob) VALUES (?, ?, ?)",
