@@ -43,6 +43,28 @@ var CMCharts = (function() {
         function hideResetBtn(u) {
             if (u._resetBtn) u._resetBtn.style.display = 'none';
         }
+        // Y window for the zoomed x range: scan every series (incl. the hidden
+        // _min_/_max_ band helpers, which are still drawn) for finite samples.
+        function setYZoom(u, min, max) {
+            var i0 = Math.max(0, Math.ceil(min));
+            var i1 = Math.min(u.data[0].length - 1, Math.floor(max));
+            var lo = null;
+            var hi = null;
+            for (var s = 1; s < u.data.length; s++) {
+                for (var i = i0; i <= i1; i++) {
+                    var v = u.data[s][i];
+                    if (v == null || !isFinite(v)) continue;
+                    if (lo === null || v < lo) lo = v;
+                    if (hi === null || v > hi) hi = v;
+                }
+            }
+            // No samples in the window: leave y alone rather than pin a degenerate range
+            if (lo === null) return;
+            var pad = (hi - lo) * 0.1;
+            if (pad < 1) pad = 1; // flat window: keep a readable band
+            u._zoomRange.yMin = Math.max(0, lo - pad);
+            u._zoomRange.yMax = hi + pad;
+        }
         return {
             hooks: {
                 init: [function(u) {
@@ -62,10 +84,17 @@ var CMCharts = (function() {
                     var max = u.posToVal(u.select.left + u.select.width, 'x');
                     if (max - min > 1) {
                         u._zoomRange = { min: min, max: max };
+                        setYZoom(u, min, max);
                         u.setScale('x', u._zoomRange);
                         showResetBtn(u);
                     }
                     u.setSelect({ left: 0, width: 0, top: 0, height: 0 }, false);
+                }],
+                // Covers the restored zoom of a re-rendered chart, where the
+                // reset button would otherwise be gone with the old instance.
+                setScale: [function(u) {
+                    if (u._zoomRange) showResetBtn(u);
+                    else hideResetBtn(u);
                 }]
             }
         };
@@ -216,6 +245,7 @@ var CMCharts = (function() {
         renderChart(containerId, labels, datasets, 'line', zones, {
             yMin: 0,
             zoomable: true,
+            xDomainKey: axisRange,
             minHeight: 260,
             maxHeight: 440,
             heightRatio: 0.42,
