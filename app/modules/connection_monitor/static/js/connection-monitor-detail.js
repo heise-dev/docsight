@@ -41,8 +41,11 @@
         if (overlay) overlay.hidden = !busy;
     }
 
+    // Every range is capped: the chart is never wider than ~1440px, the server
+    // leaves a window holding fewer rows than the cap untouched and pre-buckets in
+    // SQLite above it, so the payload is bounded whatever the probe rate is.
     function getMaxPointsForRange(seconds) {
-        return seconds >= 86400 ? 1440 : 0;
+        return 1440;
     }
 
     window.cmSetRange = function(btn, seconds) {
@@ -355,16 +358,10 @@
             start = now - currentRange;
             end = now;
         }
-        var maxPoints;
-        if (zoomWindow) {
-            // Always cap a zoom window: below 24h getMaxPointsForRange asks for
-            // everything, which for a sub-day window of raw pings is far heavier
-            // than the capped range it was zoomed out of. The chart is never wider
-            // than ~1440px and the server leaves anything under the cap untouched.
-            maxPoints = Math.max(getMaxPointsForRange(end - start), 1440);
-        } else {
-            maxPoints = pinnedDayView ? 0 : getMaxPointsForRange(currentRange);
-        }
+        // A zoom window and a pinned day are capped like any other range: an
+        // uncapped sub-day window of raw pings is far heavier than the capped
+        // range it was zoomed out of, and a pinned day keeps every raw ping.
+        var maxPoints = getMaxPointsForRange(zoomWindow ? end - start : (pinnedDayView ? 86400 : currentRange));
 
         // Fetch samples for ALL targets in parallel
         var samplePromises = targets.map(function(t) {
@@ -374,7 +371,10 @@
             // return nothing past the raw retention window).
             if (pinnedDayView && !zoomWindow) {
                 url += '&resolution=raw';
-            } else if (maxPoints > 0) {
+            }
+            // The cap rides along on the explicit raw path too - the server lays the
+            // same grid over it, so a pinned day is bounded without losing its tier.
+            if (maxPoints > 0) {
                 url += '&max_points=' + maxPoints;
             }
             return fetch(url)
@@ -449,7 +449,11 @@
                 renderOutages(allOutageData);
                 renderExportLinks();
                 renderRawLogLinks();
-                renderResolutionIndicator(meta);
+                // The raw tier is served pre-bucketed once max_points caps the window,
+                // and meta stays "raw" either way - only the samples show it.
+                renderResolutionIndicator(meta, allTargetData.some(function(td) {
+                    return (td.samples || []).some(function(s) { return s.bucket_seconds; });
+                }));
                 renderZoomWindowLabel(start, end);
                 setChartLoading(false);
             })
@@ -601,7 +605,7 @@
         return h + 'h ' + m + 'm';
     }
 
-    function renderResolutionIndicator(meta) {
+    function renderResolutionIndicator(meta, bucketed) {
         var el = document.getElementById('cm-resolution-indicator');
         if (!el || !meta) return;
         var labels = {
@@ -614,12 +618,20 @@
         // the window span, which mislabels a short window over older, aggregated data
         var tiers = servedTiers(meta);
         var text;
+        var rawOnly;
         if (tiers.length > 0) {
             text = tiers.map(function(tier) {
                 return labels[tier] || tier;
             }).join(' + ');
+            rawOnly = tiers.length === 1 && tiers[0] === 'raw';
         } else {
             text = labels[meta.resolution] || meta.resolution;
+            rawOnly = meta.resolution === 'raw';
+        }
+        // Same marker as the stats cards: the numbers come from buckets, not pings.
+        // Only the raw label needs it - an aggregated tier already names its buckets.
+        if (bucketed && rawOnly) {
+            text = '≈ ' + text;
         }
         // A pinned day is raw only until a zoom inside it refetches by data age
         if (pinnedDayView) {

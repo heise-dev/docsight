@@ -834,6 +834,32 @@ def test_connection_monitor_zoom_refetches_the_selected_window(demo_page):
     assert nested["start"] > window["start"] and nested["end"] < window["end"]
 
 
+def test_connection_monitor_sub_day_views_ask_for_a_bounded_payload(demo_page):
+    """Sub-day ranges and pinned days must cap the payload, not stream every ping."""
+    page = demo_page
+    state = {}
+    now = int(time.time())
+    pinned = [{"date": "2026-08-31", "label": "", "utc_start": now - 86400, "utc_end": now}]
+    _stub_connection_monitor_api(page, state=state, pinned_days=pinned)
+    _open_connection_monitor_chart(page)
+
+    # 1h is the default range, 6h the next one up - both used to fetch every raw ping
+    for seconds in (3600, 21600):
+        _reload_cm_range(page, seconds)
+        assert state["requests"][-1]["max_points"] == 1440, (
+            f"the {seconds}s range must ask for a bounded payload"
+        )
+
+    page.evaluate("() => { window.charts['cm-combined-chart']._e2eStale = true; }")
+    page.locator("#cm-pinned-days .cm-chip-btn", has_text="2026-08-31").click()
+    page.wait_for_function(
+        "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._e2eStale"
+    )
+    pinned_request = state["requests"][-1]
+    assert "resolution=raw" in pinned_request["url"], "a pinned day stays on the raw tier"
+    assert pinned_request["max_points"] == 1440, "a pinned day must bound its payload too"
+
+
 def test_connection_monitor_second_zoom_wins_over_a_slower_first_response(demo_page):
     """A drag while the previous drag's fetch is in flight must not be overwritten by it."""
     page = demo_page
