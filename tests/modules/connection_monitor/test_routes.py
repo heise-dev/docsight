@@ -88,6 +88,32 @@ class TestTargetsAPI:
         data = resp.get_json()
         assert data["id"] == 1
 
+    def test_create_target_defaults_to_configured_interval(self, client):
+        c, storage = client
+        _auth_session(c)
+        cfg = MagicMock()
+        cfg.get.side_effect = lambda key, default=None: (
+            1000 if key == "connection_monitor_poll_interval_ms" else default
+        )
+        with patch("app.modules.connection_monitor.routes.get_config_manager",
+                   return_value=cfg):
+            resp = c.post(
+                "/api/connection-monitor/targets",
+                json={"label": "Test", "host": "1.1.1.1"},
+            )
+        assert resp.status_code == 201
+        assert storage.get_targets()[0]["poll_interval_ms"] == 1000
+
+    def test_create_target_explicit_interval_wins(self, client):
+        c, storage = client
+        _auth_session(c)
+        resp = c.post(
+            "/api/connection-monitor/targets",
+            json={"label": "Test", "host": "1.1.1.1", "poll_interval_ms": 3000},
+        )
+        assert resp.status_code == 201
+        assert storage.get_targets()[0]["poll_interval_ms"] == 3000
+
     def test_create_target_without_host_is_disabled(self, client):
         c, storage = client
         _auth_session(c)

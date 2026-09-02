@@ -113,6 +113,80 @@ class TestCollect:
             mock_engine.probe.assert_not_called()
 
 
+class TestPollInterval:
+    """The configured probe interval must reach the per-target column."""
+
+    def _collector(self, mock_deps, value):
+        config_mgr, storage, web = mock_deps
+        base = config_mgr.get.side_effect
+        config_mgr.get.side_effect = lambda key, default=None: (
+            value if key == "connection_monitor_poll_interval_ms" else base(key, default)
+        )
+        with patch("app.modules.connection_monitor.collector.ProbeEngine"):
+            return ConnectionMonitorCollector(
+                config_mgr=config_mgr, storage=storage, web=web
+            )
+
+    def test_existing_targets_synced_on_init(self, mock_deps):
+        collector = self._collector(mock_deps, 5000)
+        collector._cm_storage.create_target("Test", "1.1.1.1")
+        assert collector._cm_storage.get_targets()[0]["poll_interval_ms"] == 5000
+        # Same DATA_DIR -> same DB, so the new collector sees the existing target
+        collector = self._collector(mock_deps, 1000)
+        assert collector._cm_storage.get_targets()[0]["poll_interval_ms"] == 1000
+
+    def test_seeded_targets_use_config_value(self, mock_deps):
+        collector = self._collector(mock_deps, 1000)
+        collector._ensure_default_targets()
+        assert [t["poll_interval_ms"] for t in collector._cm_storage.get_targets()] == [
+            1000, 1000
+        ]
+
+    def test_due_again_after_configured_interval(self, mock_deps):
+        collector = self._collector(mock_deps, 1000)
+        collector._cm_storage = MagicMock()
+        collector._cm_storage.get_targets.return_value = [
+            {"id": 1, "host": "1.1.1.1", "enabled": True,
+             "poll_interval_ms": collector._poll_interval_ms,
+             "probe_method": "tcp", "tcp_port": 443},
+        ]
+        now = time.time()
+        collector._last_probe = {1: now}
+        with patch.object(collector, "_probe_targets", return_value=[]) as probe, \
+             patch("app.modules.connection_monitor.collector.time.time",
+                   return_value=now + 1.0):
+            collector.collect()
+            assert probe.call_count == 1
+
+    def test_not_due_after_1s_with_default_interval(self, mock_deps):
+        collector = self._collector(mock_deps, 5000)
+        collector._cm_storage = MagicMock()
+        collector._cm_storage.get_targets.return_value = [
+            {"id": 1, "host": "1.1.1.1", "enabled": True,
+             "poll_interval_ms": collector._poll_interval_ms,
+             "probe_method": "tcp", "tcp_port": 443},
+        ]
+        now = time.time()
+        collector._last_probe = {1: now}
+        with patch.object(collector, "_probe_targets", return_value=[]) as probe, \
+             patch("app.modules.connection_monitor.collector.time.time",
+                   return_value=now + 1.0):
+            collector.collect()
+            probe.assert_not_called()
+
+    @pytest.mark.parametrize("value,expected", [
+        ("500", 1000),
+        (500, 1000),
+        ("2000", 2000),
+        ("", 5000),
+        (None, 5000),
+        ("abc", 5000),
+    ])
+    def test_interval_coercion_and_clamp(self, mock_deps, value, expected):
+        collector = self._collector(mock_deps, value)
+        assert collector._poll_interval_ms == expected
+
+
 class TestCleanupCycle:
     def test_aggregation_called_before_cleanup(self, mock_deps):
         """The cleanup cycle should call aggregate() before cleanup()."""
