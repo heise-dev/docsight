@@ -116,6 +116,14 @@ class ConnectionMonitorStorage:
             )
             return True
 
+    def set_poll_interval_all(self, poll_interval_ms: int):
+        """Apply the configured probe interval to every target."""
+        with self._write() as conn:
+            conn.execute(
+                "UPDATE connection_targets SET poll_interval_ms = ?",
+                (poll_interval_ms,),
+            )
+
     def delete_target(self, target_id: int):
         with self._write() as conn:
             conn.execute(

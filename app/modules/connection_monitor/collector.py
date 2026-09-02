@@ -17,6 +17,22 @@ logger = logging.getLogger(__name__)
 # Run retention cleanup every 15 minutes, not every collect cycle
 _CLEANUP_INTERVAL_S = 900
 
+_DEFAULT_POLL_INTERVAL_MS = 5000
+_MIN_POLL_INTERVAL_MS = 1000
+
+
+def resolve_poll_interval_ms(config_mgr) -> int:
+    """Configured probe interval in ms, tolerating unset/garbage values."""
+    raw = (
+        config_mgr.get("connection_monitor_poll_interval_ms", _DEFAULT_POLL_INTERVAL_MS)
+        if config_mgr else _DEFAULT_POLL_INTERVAL_MS
+    )
+    try:
+        interval_ms = int(raw)
+    except (TypeError, ValueError):
+        interval_ms = _DEFAULT_POLL_INTERVAL_MS
+    return max(_MIN_POLL_INTERVAL_MS, interval_ms)
+
 
 class ConnectionMonitorCollector(Collector):
     """Always-on latency collector with per-target timing."""
@@ -46,6 +62,14 @@ class ConnectionMonitorCollector(Collector):
             probe=self._traceroute_probe,
             storage=self._cm_storage,
         )
+
+        # The configured interval is written into the per-target column because
+        # every consumer reads it from there: the scheduler in collect(), the
+        # outage gap heuristic in storage and correlation.js. Saving the config
+        # restarts the polling loop, which re-instantiates this collector, so a
+        # changed interval applies immediately.
+        self._poll_interval_ms = resolve_poll_interval_ms(config_mgr)
+        self._cm_storage.set_poll_interval_all(self._poll_interval_ms)
 
         self._seeded = False
         self._smart_capture = None
@@ -175,8 +199,12 @@ class ConnectionMonitorCollector(Collector):
             return
         self._seeded = True
         if not self._cm_storage.get_targets():
-            self._cm_storage.create_target("Cloudflare DNS", "1.1.1.1")
-            self._cm_storage.create_target("Google DNS", "8.8.8.8")
+            self._cm_storage.create_target(
+                "Cloudflare DNS", "1.1.1.1", poll_interval_ms=self._poll_interval_ms
+            )
+            self._cm_storage.create_target(
+                "Google DNS", "8.8.8.8", poll_interval_ms=self._poll_interval_ms
+            )
             logger.info("Connection Monitor: seeded default targets")
 
     def get_storage(self) -> ConnectionMonitorStorage:

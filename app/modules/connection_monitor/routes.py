@@ -16,6 +16,7 @@ from app.tz import local_date_to_utc_range, local_today, to_local_display, _pars
 from app.web import get_config_manager, require_auth, _get_tz_name
 from app.runtime import current_runtime
 
+from .collector import resolve_poll_interval_ms
 from .probe import ProbeEngine
 from .storage import ConnectionMonitorStorage
 from .traceroute_probe import TracerouteProbe
@@ -91,7 +92,9 @@ def api_create_target():
         label=data["label"],
         host=host,
         enabled=bool(host),
-        poll_interval_ms=data.get("poll_interval_ms", 5000),
+        poll_interval_ms=data.get(
+            "poll_interval_ms", resolve_poll_interval_ms(get_config_manager())
+        ),
         probe_method=data.get("probe_method", "auto"),
         tcp_port=data.get("tcp_port", 443),
     )
