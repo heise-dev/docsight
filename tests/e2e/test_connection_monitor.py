@@ -85,7 +85,8 @@ def _requested_window(url):
 
 def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned_days=None,
                                  state=None, interval=60, meta=None, target_metas=None,
-                                 band_max=None, loss_index=None, stats=None, outages=None):
+                                 band_max=None, loss_index=None, loss_target=None, stats=None,
+                                 outages=None):
     """Serve deterministic Connection Monitor data: one target, one latency outlier.
 
     Samples are served only inside the requested window, so a fetch that narrows
@@ -96,7 +97,8 @@ def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned
     answer depends on the resolution asked for. ``target_metas`` instead serves
     one target per entry, each with its own envelope meta. ``band_max`` adds
     per-bucket min/max so the chart draws a min/max band, and ``loss_index``
-    marks one sample as fully lost so the loss markers are drawn. ``stats``
+    marks one sample as fully lost so the loss markers are drawn - for every
+    target, or only for the one ``loss_target`` names by id. ``stats``
     serves the range-stats payload (keyed by target id as a string) and
     ``outages`` the outage list; both keep their empty defaults when omitted.
     """
@@ -130,10 +132,14 @@ def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned
                 for i in range(len(target_metas) if target_metas else 1)
             ])
         elif "/samples/" in url:
+            target_id = int(url.split("/samples/")[1].split("?")[0])
             window = _requested_window(url)
-            served = samples
+            # A loss pinned to one target is served as a clean sample everywhere else
+            served = samples if loss_target in (None, target_id) else [
+                dict(s, packet_loss_pct=0, timeout_count=0) for s in samples
+            ]
             if window is not None:
-                served = [s for s in samples if window[0] <= s["timestamp"] <= window[1]]
+                served = [s for s in served if window[0] <= s["timestamp"] <= window[1]]
             if state is not None:
                 params = parse_qs(urlparse(url).query)
                 state["requests"].append({
@@ -143,7 +149,7 @@ def _stub_connection_monitor_api(page, sample_count=240, outlier_index=5, pinned
                     "url": url,
                 })
             if target_metas:
-                served_meta = target_metas[int(url.split("/samples/")[1].split("?")[0]) - 1]
+                served_meta = target_metas[target_id - 1]
             elif callable(meta):
                 served_meta = meta(url)
             else:
@@ -270,6 +276,7 @@ def _cm_chart_flags(page):
             const plugins = u._docsightParams.opts.plugins;
             return {
                 lossMarkers: !!(plugins[0] && plugins[0]._cmLossMarkers),
+                lossCount: plugins[0] && plugins[0]._cmLossCount || 0,
                 clipHints: u._cmClipHints || 0,
                 yMaxStrict: !!u._docsightParams.opts.yMaxStrict,
             };
@@ -594,6 +601,39 @@ def test_connection_monitor_loss_marker_toggle_removes_the_markers(demo_page):
     assert _cm_chart_flags(page)["lossMarkers"] is False, "the loss toggle must survive a reload"
     expect(page.locator("#cm-chart-controls [data-toggle='loss']")).to_have_attribute(
         "aria-pressed", "false"
+    )
+
+
+def test_connection_monitor_loss_marker_follows_the_line_toggle(demo_page):
+    """A switched-off target must not leave its packet loss marked on the chart."""
+    page = demo_page
+    _stub_connection_monitor_api(
+        page,
+        target_metas=[{"resolution": "raw"}, {"resolution": "raw"}],
+        loss_index=7,
+        loss_target=2,
+    )
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+
+    flags = _cm_chart_flags(page)
+    assert flags["lossMarkers"] is True, "loss markers are on by default"
+    assert flags["lossCount"] == 1, f"target 2's loss must be marked: {flags}"
+
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='line'][data-target='1']")
+    assert _cm_chart_flags(page)["lossCount"] == 1, (
+        "hiding target 1 must not drop target 2's loss marker"
+    )
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='line'][data-target='1']")
+
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='line'][data-target='2']")
+    flags = _cm_chart_flags(page)
+    assert flags["lossCount"] == 0, "a hidden target's loss must not stay marked"
+    assert flags["lossMarkers"] is True, "the global loss toggle stays untouched"
+
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='line'][data-target='2']")
+    assert _cm_chart_flags(page)["lossCount"] == 1, (
+        "switching the target back on brings its loss marker back"
     )
 
 

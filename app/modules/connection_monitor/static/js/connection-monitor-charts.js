@@ -569,14 +569,16 @@ var CMCharts = (function() {
      * uPlot plugin: draw red vertical lines at packet loss indices.
      * Uses 'draw' hook so lines render ON TOP of series (like PingPlotter).
      * `_cmLossMarkers` reports the controls-strip toggle, so a switched-off marker
-     * layer stays distinguishable from a window that simply carries no loss.
+     * layer stays distinguishable from a window that simply carries no loss;
+     * `_cmLossCount` reports how many indices are marked.
      */
     function lossMarkersPlugin(lossIndices, enabled) {
         if (!enabled || !lossIndices || lossIndices.length === 0) {
-            return { _cmLossMarkers: !!enabled };
+            return { _cmLossMarkers: !!enabled, _cmLossCount: lossIndices ? lossIndices.length : 0 };
         }
         return {
             _cmLossMarkers: true,
+            _cmLossCount: lossIndices.length,
             hooks: {
                 draw: [function(u) {
                     var ctx = u.ctx;
@@ -696,10 +698,12 @@ var CMCharts = (function() {
         var bandByLabel = {};
 
         allTargetData.forEach(function(td, tIdx) {
+            var shown = targetControls(td.target.id);
             var sampleMap = {};
             td.samples.forEach(function(s) {
                 sampleMap[s.timestamp] = s;
-                if (lossPctOf(s) > 0) lossSet[tsIndex[s.timestamp]] = true;
+                // Loss markers follow the line toggles: a switched-off target's loss is not marked
+                if (shown.line && lossPctOf(s) > 0) lossSet[tsIndex[s.timestamp]] = true;
             });
             var data = new Array(timestamps.length);
             var minData = new Array(timestamps.length);
@@ -719,7 +723,6 @@ var CMCharts = (function() {
                 }
             }
             var color = TARGET_COLORS[tIdx % TARGET_COLORS.length];
-            var shown = targetControls(td.target.id);
             var label = td.target.label + (td.target.host ? ' (' + td.target.host + ')' : '');
             controlRows.push({
                 id: td.target.id,
