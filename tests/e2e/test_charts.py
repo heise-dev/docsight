@@ -5,6 +5,9 @@ Tests cover: hero chart, trend charts, channel charts, compare charts,
 zoom modal, theme switching, responsive sizing, and crosshair sync.
 """
 
+import json
+from datetime import date, timedelta
+
 from playwright.sync_api import expect
 
 # ── Helpers ──
@@ -268,6 +271,105 @@ class TestChartZoom:
             close_btn.click()
             demo_page.wait_for_timeout(200)
             assert not demo_page.locator("#chart-zoom-overlay").is_visible()
+
+
+# ── BQM Chart Zoom ──
+
+
+def bqm_stub_payload(day):
+    """One day of synthetic 5-minute BQM samples for the stubbed CSV endpoint."""
+    timestamps = []
+    for i in range(288):
+        minute = i * 5
+        timestamps.append(f"{day}T{minute // 60:02d}:{minute % 60:02d}:00")
+    return {
+        "date": day,
+        "points": len(timestamps),
+        "data": {
+            "timestamps": timestamps,
+            "latency_min": [8.0] * len(timestamps),
+            "latency_avg": [12.0 + (i % 7) for i in range(len(timestamps))],
+            "latency_max": [30.0] * len(timestamps),
+            "lost_polls": [0] * len(timestamps),
+            "sent_polls": [100] * len(timestamps),
+        },
+    }
+
+
+class TestBqmChartZoom:
+    """Zoom state on the BQM chart, the only zoomable caller without an xDomainKey."""
+
+    def test_bqm_zoom_survives_chart_reload(self, demo_page):
+        """Reloading the same BQM day should keep the zoom, not reset to the full day."""
+        dates = [
+            (date.today() + timedelta(days=offset)).isoformat() for offset in (-1, 0, 1)
+        ]
+
+        def serve_data(route):
+            day = route.request.url.rsplit("/", 1)[-1]
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(bqm_stub_payload(day)),
+            )
+
+        def serve_dates(route):
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"csv_dates": dates, "png_dates": []}),
+            )
+
+        # Demo mode seeds BQM PNGs only, so the uPlot chart needs stubbed CSV data.
+        demo_page.route("**/api/bqm/data/*", serve_data)
+        demo_page.route("**/api/bqm/data/dates", serve_dates)
+        demo_page.reload()
+        demo_page.wait_for_load_state("networkidle")
+
+        demo_page.locator('.nav-item[data-view="bqm"]').click()
+        demo_page.wait_for_function("() => _bqmDatesLoaded")
+        # Demo mode opens the live PNG view; pick the stubbed day to get the chart.
+        day = demo_page.evaluate("bqmDate")
+        demo_page.evaluate("d => selectBqmDate(d)", day)
+        wait_for_uplot(demo_page, "bqm-chart-container")
+
+        # Zoom into the second quarter of the day without a mouse drag: passing
+        # true to setSelect fires the shared zoomPlugin's setSelect hook.
+        zoom = demo_page.evaluate(
+            """() => {
+                const u = charts['bqm-chart-container'];
+                const xs = u.data[0];
+                const left = u.valToPos(xs[Math.floor(xs.length * 0.25)], 'x');
+                const right = u.valToPos(xs[Math.floor(xs.length * 0.5)], 'x');
+                u.setSelect({left: left, width: right - left, top: 0, height: u.bbox.height}, true);
+                return u._zoomRange;
+            }"""
+        )
+        assert zoom is not None, "Drag select should have stored a zoom range"
+        full_span = demo_page.evaluate(
+            "() => { const xs = charts['bqm-chart-container'].data[0];"
+            " return xs[xs.length - 1] - xs[0]; }"
+        )
+        assert zoom["max"] - zoom["min"] < full_span / 2
+
+        # setScale is asynchronous — wait for the zoom to reach the x scale.
+        applied = """z => {
+            const u = charts['bqm-chart-container'];
+            return u && !u._e2eStale
+                && Math.abs(u.scales.x.min - z.min) < 1
+                && Math.abs(u.scales.x.max - z.max) < 1;
+        }"""
+        demo_page.wait_for_function(applied, arg=zoom)
+
+        # Stamp the live instance so the wait below proves a genuinely new uPlot.
+        demo_page.evaluate("() => { charts['bqm-chart-container']._e2eStale = true; }")
+        demo_page.evaluate("d => selectBqmDate(d)", day)
+        demo_page.wait_for_function(applied, arg=zoom)
+
+        restored = demo_page.evaluate("() => charts['bqm-chart-container']._zoomRange")
+        assert restored is not None, "Re-render should restore the saved zoom range"
+        assert abs(restored["min"] - zoom["min"]) < 1
+        assert abs(restored["max"] - zoom["max"]) < 1
 
 
 # ── Channel Timeline Charts ──
