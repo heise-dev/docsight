@@ -879,6 +879,7 @@
   "seg_range_7d": "7d",
   "seg_range_30d": "30 d",
   "seg_range_all": "Toate",
+  "seg_smooth": "Netezire",
   "seg_note": "Valorile de utilizare a segmentului sunt estimări furnizate de FRITZ!Box și pot diferi de încărcarea reală la nivelul CMTS.",
   "seg_disabled": "Utilizarea segmentului este dezactivată în Setări.",
   "seg_unsupported_driver": "Această vizualizare este disponibilă numai pentru dispozitivele cu cablu FRITZ!Box.",

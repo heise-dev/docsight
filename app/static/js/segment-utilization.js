@@ -1,9 +1,32 @@
 /* ── FRITZ!Box Cable Segment Utilization ── */
 
 var _fritzCableRange = 'all';
+var _FRITZ_CABLE_CHART_KEY = 'docsight-segment-utilization-chart';
+
+/* Chart display options, persisted per browser. Smoothing is off by default. */
+var _fritzCableChartOpts = _fritzCableLoadChartOpts();
+/* Last _fritzCableRenderChart() arguments per canvas, so the smooth toggle can
+   re-render the same samples without refetching. */
+var _fritzCableRenderArgs = {};
+
+function _fritzCableLoadChartOpts() {
+    var state = { smooth: false };
+    try {
+        var stored = JSON.parse(localStorage.getItem(_FRITZ_CABLE_CHART_KEY));
+        if (stored && stored.smooth === true) state.smooth = true;
+    } catch (err) {}
+    return state;
+}
+
+function _fritzCableSaveChartOpts() {
+    try {
+        localStorage.setItem(_FRITZ_CABLE_CHART_KEY, JSON.stringify(_fritzCableChartOpts));
+    } catch (err) {}
+}
 
 /* ── Range Tab Switching ── */
-var fritzCableTabs = document.querySelectorAll('#fritz-cable-range-tabs .trend-tab');
+/* [data-range] excludes the smooth toggle, which shares the pill styling */
+var fritzCableTabs = document.querySelectorAll('#fritz-cable-range-tabs .trend-tab[data-range]');
 fritzCableTabs.forEach(function(btn) {
     btn.addEventListener('click', function() {
         _fritzCableRange = this.getAttribute('data-range');
@@ -13,6 +36,32 @@ fritzCableTabs.forEach(function(btn) {
         loadFritzCableData();
     });
 });
+
+/* ── Smoothing Toggle ── */
+var fritzCableSmoothBtn = document.querySelector('#fritz-cable-range-tabs [data-toggle="smooth"]');
+
+function _fritzCableSyncSmoothBtn() {
+    if (!fritzCableSmoothBtn) return;
+    var on = _fritzCableChartOpts.smooth;
+    fritzCableSmoothBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    fritzCableSmoothBtn.classList.toggle('active', on);
+}
+
+if (fritzCableSmoothBtn) {
+    _fritzCableSyncSmoothBtn();
+    fritzCableSmoothBtn.addEventListener('click', function() {
+        _fritzCableChartOpts.smooth = !_fritzCableChartOpts.smooth;
+        _fritzCableSaveChartOpts();
+        _fritzCableSyncSmoothBtn();
+        /* Re-render both charts from the cached samples - no refetch. The cache
+           is empty unless the charts are rendered and visible, so a toggle
+           during a load or on an error/empty view is a no-op here. */
+        Object.keys(_fritzCableRenderArgs).forEach(function(id) {
+            var args = _fritzCableRenderArgs[id];
+            _fritzCableRenderChart(id, args.samples, args.totalKey, args.ownKey);
+        });
+    });
+}
 
 /* ── i18n helper ── */
 function _fcT(key, fallback) {
@@ -29,6 +78,11 @@ function loadFritzCableData() {
     if (skel) skel.style.display = '';
     msg.style.display = 'none';
     content.style.display = 'none';
+    // The cached args belong to the range being replaced. Dropping them here
+    // keeps the invariant "cache non-empty == charts rendered and visible": an
+    // in-flight range switch cannot be re-rendered with the new range's label
+    // format, and the error/empty branches below leave nothing behind either.
+    _fritzCableRenderArgs = {};
 
     fetch(docsightUrl('/api/fritzbox/segment-utilization?range=' + encodeURIComponent(_fritzCableRange)))
         .then(function(r) { return r.json(); })
@@ -302,17 +356,22 @@ function _fritzCableRenderChart(containerId, samples, totalKey, ownKey) {
 
     var labels = docsightFormatXAxisLabels(samples.map(function(s) { return s.timestamp; }), _fritzCableRange);
 
+    // Cached so the smooth toggle can re-render the same samples (see the toggle handler)
+    _fritzCableRenderArgs[containerId] = { samples: samples, totalKey: totalKey, ownKey: ownKey };
+
     var datasets = [
         {
             label: _fcT('total', 'Total'),
             data: samples.map(function(s) { return s[totalKey]; }),
-            color: 'rgba(168,85,247,0.9)', fill: 'rgba(168,85,247,0.15)'
+            color: 'rgba(168,85,247,0.9)', fill: 'rgba(168,85,247,0.15)',
+            smooth: _fritzCableChartOpts.smooth
         },
         {
             label: _fcT('own', 'Own Share'),
             data: samples.map(function(s) { return s[ownKey]; }),
             color: '#6366f1',
-            dashed: true
+            dashed: true,
+            smooth: _fritzCableChartOpts.smooth
         }
     ];
 

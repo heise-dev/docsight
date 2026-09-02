@@ -879,6 +879,7 @@
   "seg_range_7d": "7d",
   "seg_range_30d": "30 d",
   "seg_range_all": "Viskas",
+  "seg_smooth": "Glodinimas",
   "seg_note": "Segmento panaudojimo vertės yra FRITZ!Box pateiktos apytikslės vertės ir gali skirtis nuo faktinės CMTS apkrovos.",
   "seg_disabled": "Segmentų naudojimas išjungtas nustatymuose.",
   "seg_unsupported_driver": "Šis rodinys galimas tik FRITZ!Box kabelių įrenginiuose.",

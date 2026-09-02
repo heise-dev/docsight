@@ -879,6 +879,7 @@
   "seg_range_7d": "7d",
   "seg_range_30d": "30d",
   "seg_range_all": "Alle",
+  "seg_smooth": "Glätten",
   "seg_note": "Die Auslastungswerte sind Schätzungen der FRITZ!Box und können von der tatsächlichen Segmentauslastung abweichen.",
   "seg_disabled": "Segment-Auslastung ist in den Einstellungen deaktiviert.",
   "seg_unsupported_driver": "Diese Ansicht ist nur für FRITZ!Box-Kabelgeräte verfügbar.",

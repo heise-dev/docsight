@@ -879,6 +879,7 @@
   "seg_range_7d": "7d",
   "seg_range_30d": "30d",
   "seg_range_all": "Wszystko",
+  "seg_smooth": "Wygładzanie",
   "seg_note": "Wartości wykorzystania segmentów są szacunkowe podane przez FRITZ!Box i mogą różnić się od rzeczywistego obciążenia całego CMTS.",
   "seg_disabled": "Wykorzystanie segmentu jest wyłączone w Ustawieniach.",
   "seg_unsupported_driver": "Ten widok jest dostępny tylko dla urządzeń kablowych FRITZ!Box.",

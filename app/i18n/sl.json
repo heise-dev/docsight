@@ -879,6 +879,7 @@
   "seg_range_7d": "7d",
   "seg_range_30d": "30d",
   "seg_range_all": "Vse",
+  "seg_smooth": "Glajenje",
   "seg_note": "Vrednosti izkoriščenosti segmenta so ocene, ki jih zagotavlja FRITZ!Box in se lahko razlikujejo od dejanske obremenitve celotnega CMTS.",
   "seg_disabled": "Uporaba segmenta je onemogočena v nastavitvah.",
   "seg_unsupported_driver": "Ta pogled je na voljo samo za kabelske naprave FRITZ!Box.",

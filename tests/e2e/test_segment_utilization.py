@@ -24,6 +24,18 @@ def wait_for_content(page, timeout=5000):
     page.wait_for_selector("#fritz-cable-content:not([style*='display: none'])", timeout=timeout)
 
 
+def segment_smoothed(page, chart_id):
+    """Whether each series of a segment chart uses uPlot's spline path builder."""
+    return page.evaluate(
+        """(id) => {
+            const spline = uPlot.paths.spline().toString();
+            return window.charts[id].series.slice(1).map(
+                (s) => !!s.paths && s.paths.toString() === spline);
+        }""",
+        chart_id,
+    )
+
+
 # ── Navigation & Visibility ──
 
 
@@ -247,6 +259,55 @@ class TestSegmentRangeTabs:
         fritzbox_page.wait_for_timeout(1000)
         active_tabs = fritzbox_page.locator("#fritz-cable-range-tabs .trend-tab.active")
         assert active_tabs.count() == 1, f"Expected 1 active tab, got {active_tabs.count()}"
+
+
+# ── Smoothing Toggle ──
+
+
+class TestSegmentSmoothing:
+    """Opt-in smoothed chart lines, persisted per browser."""
+
+    def test_smooth_toggle_splines_both_charts_and_persists(self, fritzbox_page):
+        """Smoothing is off by default, covers both series, and survives a reload."""
+        navigate_to_segment(fritzbox_page)
+        wait_for_content(fritzbox_page)
+        fritzbox_page.wait_for_selector("#fritz-cable-ds-chart .uplot", timeout=5000)
+
+        toggle = fritzbox_page.locator('#fritz-cable-range-tabs [data-toggle="smooth"]')
+        assert toggle.count() == 1, "the segment charts need their own smoothing toggle"
+        assert toggle.get_attribute("aria-pressed") == "false"
+        assert segment_smoothed(fritzbox_page, "fritz-cable-ds-chart") == [False, False]
+
+        toggle.click()
+        fritzbox_page.wait_for_function(
+            """() => {
+                const spline = uPlot.paths.spline().toString();
+                return window.charts['fritz-cable-ds-chart'].series[1].paths.toString() === spline;
+            }"""
+        )
+        assert segment_smoothed(fritzbox_page, "fritz-cable-ds-chart") == [True, True]
+        assert segment_smoothed(fritzbox_page, "fritz-cable-us-chart") == [True, True]
+        assert toggle.get_attribute("aria-pressed") == "true"
+
+        fritzbox_page.reload()
+        fritzbox_page.wait_for_load_state("networkidle")
+        navigate_to_segment(fritzbox_page)
+        wait_for_content(fritzbox_page)
+        fritzbox_page.wait_for_selector("#fritz-cable-ds-chart .uplot", timeout=5000)
+        assert segment_smoothed(fritzbox_page, "fritz-cable-ds-chart") == [True, True], (
+            "the smooth toggle must survive a page reload"
+        )
+        reloaded_toggle = fritzbox_page.locator('#fritz-cable-range-tabs [data-toggle="smooth"]')
+        assert reloaded_toggle.get_attribute("aria-pressed") == "true"
+
+        reloaded_toggle.click()
+        fritzbox_page.wait_for_function(
+            """() => {
+                const spline = uPlot.paths.spline().toString();
+                return window.charts['fritz-cable-ds-chart'].series[1].paths.toString() !== spline;
+            }"""
+        )
+        assert segment_smoothed(fritzbox_page, "fritz-cable-ds-chart") == [False, False]
 
 
 # ── API Endpoints ──
@@ -574,7 +635,7 @@ class TestSegmentViewStructure:
     def test_has_four_range_tabs(self, fritzbox_page):
         """Should have 4 range tabs (24h, 7d, 30d, all)."""
         navigate_to_segment(fritzbox_page)
-        tabs = fritzbox_page.locator("#fritz-cable-range-tabs .trend-tab")
+        tabs = fritzbox_page.locator("#fritz-cable-range-tabs .trend-tab[data-range]")
         assert tabs.count() == 4
 
 

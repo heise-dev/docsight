@@ -879,6 +879,7 @@
   "seg_range_7d": "7p",
   "seg_range_30d": "30pv",
   "seg_range_all": "Kaikki",
+  "seg_smooth": "Pehmennys",
   "seg_note": "Segmenttien käyttöarvot ovat FRITZ!Box:n antamia arvioita, ja ne voivat poiketa todellisesta CMTS:n laajuisesta kuormituksesta.",
   "seg_disabled": "Segmenttien käyttö on poistettu käytöstä asetuksissa.",
   "seg_unsupported_driver": "Tämä näkymä on käytettävissä vain FRITZ!Box-kaapelilaitteille.",

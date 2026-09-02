@@ -879,6 +879,7 @@
   "seg_range_7d": "7d",
   "seg_range_30d": "30d",
   "seg_range_all": "Mind",
+  "seg_smooth": "Simítás",
   "seg_note": "A szegmenskihasználtsági értékek a FRITZ!Box becslései, és eltérhetnek a tényleges CMTS-szintű terheléstől.",
   "seg_disabled": "A szegmenshasználat le van tiltva a Beállításokban.",
   "seg_unsupported_driver": "Ez a nézet csak a FRITZ!Box kábeles eszközökön érhető el.",

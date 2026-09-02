@@ -196,42 +196,71 @@ function zoomPlugin() {
     };
 }
 
+/**
+ * The filled region of one band helper series: its own stroke closed down to the
+ * series' fillTo baseline, produced by that series' OWN path builder so the
+ * envelope follows whatever interpolation the helper uses - linear by default, a
+ * spline once the caller sets ds.smooth. uPlot always installs a fill function on
+ * a series, so every builder returns a closed _paths.fill with direction-correct
+ * endpoints. The index window is the one uPlot's own drawSeries passes - one point
+ * beyond the visible range, then outwards past leading/trailing nulls - so on a
+ * zoomed chart the envelope reaches the plot edges exactly like the line does.
+ * @returns {Path2D|null} null when the series has nothing to draw
+ */
+function helperFillPath(u, seriesIdx) {
+    var s = u.series[seriesIdx];
+    var data = u.data[seriesIdx];
+    var idxs = u.series[0].idxs;
+    if (!data || !idxs || typeof s.paths !== 'function') return null;
+    var last = data.length - 1;
+    var i0 = Math.max(0, Math.min(idxs[0] - 1, last));
+    var i1 = Math.max(0, Math.min(idxs[1] + 1, last));
+    while (data[i0] == null && i0 > 0) i0--;
+    while (data[i1] == null && i1 < last) i1++;
+    // Hidden series are never drawn, so uPlot caches no _paths for them
+    var built = s.paths(u, seriesIdx, i0, i1);
+    return built && built.fill ? built.fill : null;
+}
+
+/* First and last non-null index of a series, or null when it holds none. */
+function nonNullBounds(data) {
+    var first = 0;
+    var last = data.length - 1;
+    while (first <= last && data[first] == null) first++;
+    if (first > last) return null;
+    while (data[last] == null) last--;
+    return [first, last];
+}
+
 function bandPlugin(minSeriesIdx, maxSeriesIdx, color) {
     return {
         hooks: {
             draw: [function(u) {
-                var ctx = u.ctx;
                 var minData = u.data[minSeriesIdx];
                 var maxData = u.data[maxSeriesIdx];
                 if (!minData || !maxData) return;
+                /* The two helpers must start and end on the same index: the even-odd
+                   fill below is the band only while they do, and an asymmetric end
+                   would paint a solid block from the max curve down to the baseline.
+                   Callers derive min and max from one sample, so they are null
+                   together; nulls *inside* the span stay bridged, as before. */
+                var minBounds = nonNullBounds(minData);
+                var maxBounds = nonNullBounds(maxData);
+                if (!minBounds || !maxBounds) return;
+                if (minBounds[0] !== maxBounds[0] || minBounds[1] !== maxBounds[1]) return;
+                var region = helperFillPath(u, maxSeriesIdx);
+                var minRegion = helperFillPath(u, minSeriesIdx);
+                if (!region || !minRegion) return;
+                /* Both regions run from their curve to the same fillTo baseline and
+                   min never sits above max, so the even-odd difference is the band */
+                region.addPath(minRegion);
+                var ctx = u.ctx;
                 ctx.save();
                 ctx.beginPath();
                 ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
                 ctx.clip();
                 ctx.fillStyle = color;
-                ctx.beginPath();
-                var started = false;
-                for (var i = 0; i < maxData.length; i++) {
-                    if (maxData[i] != null && minData[i] != null) {
-                        var x = u.valToPos(u.data[0][i], 'x', true);
-                        var y = u.valToPos(maxData[i], u.series[minSeriesIdx].scale, true);
-                        if (!started) {
-                            ctx.moveTo(x, y);
-                            started = true;
-                        } else {
-                            ctx.lineTo(x, y);
-                        }
-                    }
-                }
-                for (var j = minData.length - 1; j >= 0; j--) {
-                    if (maxData[j] != null && minData[j] != null) {
-                        var x2 = u.valToPos(u.data[0][j], 'x', true);
-                        var y2 = u.valToPos(minData[j], u.series[minSeriesIdx].scale, true);
-                        ctx.lineTo(x2, y2);
-                    }
-                }
-                ctx.closePath();
-                ctx.fill();
+                ctx.fill(region, 'evenodd');
                 ctx.restore();
             }]
         }
@@ -485,6 +514,8 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
 
     /* Determine bar path renderer */
     var barPaths = isBar ? uPlot.paths.bars({size: [0.7, 50], gap: 1}) : null;
+    /* Shared spline renderer, built on the first dataset that opts into smoothing */
+    var smoothPaths = null;
 
     allDatasets.forEach(function(ds) {
         var showPoints = ds.showPoints;
@@ -511,6 +542,11 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
         if (ds.stepped) {
             s.paths = uPlot.paths.stepped({ align: -1 });
             s.width = 2;
+        }
+        /* Opt-in smoothing; bars and stepped lines keep their own renderer */
+        if (ds.smooth && !isBar && !ds.stepped) {
+            if (!smoothPaths) smoothPaths = uPlot.paths.spline();
+            s.paths = smoothPaths;
         }
         if (ds.dashed) {
             s.dash = [5, 5];
@@ -828,6 +864,7 @@ function openChartZoom(canvasId) {
 
         /* Series */
         var barPaths = isBar ? uPlot.paths.bars({size: [0.7, 50], gap: 1}) : null;
+        var zoomSmoothPaths = null;
         var uSeries = [{ label: 'X', value: function(u, v) { return params.labels[v] || ''; } }];
         params.datasets.forEach(function(ds) {
             var zoomShowPoints = ds.showPoints;
@@ -848,6 +885,10 @@ function openChartZoom(canvasId) {
             if (ds.fillTo !== undefined && ds.fillTo !== null) s.fillTo = ds.fillTo;
             if (isBar) { s.paths = barPaths; s.points = { show: false }; }
             if (ds.stepped) { s.paths = uPlot.paths.stepped({ align: -1 }); s.width = 2; }
+            if (ds.smooth && !isBar && !ds.stepped) {
+                if (!zoomSmoothPaths) zoomSmoothPaths = uPlot.paths.spline();
+                s.paths = zoomSmoothPaths;
+            }
             if (ds.dashed) { s.dash = [5, 5]; }
             uSeries.push(s);
         });
