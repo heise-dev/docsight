@@ -297,11 +297,16 @@ var CMCharts = (function() {
                                 max >= timestamps.length - 2);
                         }
                     };
+                    // Undo the zoom, window and all. A phone has no double-click, so
+                    // the touch plugin's pinch-out goes through the same path.
+                    u._cmZoomClear = function() {
+                        clearZoom(u);
+                        hideResetBtn(u);
+                    };
                 }],
                 ready: [function(u) {
                     u.over.addEventListener('dblclick', function() {
-                        clearZoom(u);
-                        hideResetBtn(u);
+                        u._cmZoomClear();
                     });
                     // A zoomed refetch builds a chart whose x-domain IS the zoom
                     // window, so no setScale follows to raise the button.
@@ -338,6 +343,7 @@ var CMCharts = (function() {
         var startY = 0;
         var pinch = null;   // x values under the two fingers when the pinch started
         var zoomTo = null;  // last window the pinch applied; null = nothing to commit
+        var preZoom = null; // _zoomRange before the pinch, to fall back on if it is abandoned
 
         function moveCursor(u, touch) {
             // Drives u.cursor and every setCursor hook - readout included
@@ -371,17 +377,34 @@ var CMCharts = (function() {
             u.setScale('x', zoomTo);
         }
 
+        // A poll rebuild during the gesture destroys the instance while these
+        // listeners live on in the old u.over; nothing may be written to it then.
+        function alive(u) {
+            return u.root && u.root.isConnected;
+        }
+
+        // Put an abandoned gesture back: only a commit may keep the preview's
+        // _zoomRange, which the engine would otherwise re-apply on every poll.
+        function restorePreview(u) {
+            if (!zoomTo) return;
+            zoomTo = null;
+            if (!alive(u)) return;
+            u._zoomRange = preZoom;
+            u.setScale('x', preZoom || { min: 0, max: u.data[0].length - 1 });
+        }
+
         function commitPinch(u) {
             if (!zoomTo) return;  // a pinch that never moved has nothing to commit
+            if (!alive(u)) { zoomTo = null; return; }
             var last = u.data[0].length - 1;
-            // Pinched back out to the full view: there is no data outside it to
-            // fetch, so drop the preview instead of committing a window.
+            // Pinched back out to the full view: on a phone this is the undo
+            // gesture, so it clears a committed window like the desktop dblclick.
             if (zoomTo.min <= 0 && zoomTo.max >= last) {
-                u._zoomRange = null;
-                u.setScale('x', { min: 0, max: last });
-                return;
+                if (typeof u._cmZoomClear === 'function') u._cmZoomClear();
+            } else if (typeof u._cmZoomTo === 'function') {
+                u._cmZoomTo(zoomTo.min, zoomTo.max);
             }
-            if (typeof u._cmZoomTo === 'function') u._cmZoomTo(zoomTo.min, zoomTo.max);
+            zoomTo = null;
         }
 
         return {
@@ -394,13 +417,15 @@ var CMCharts = (function() {
                 ready: [function(u) {
                     u.over.addEventListener('touchstart', function(e) {
                         rect = u.over.getBoundingClientRect();
-                        zoomTo = null;
                         if (e.touches.length === 1) {
                             mode = 'pending';
                             startX = e.touches[0].clientX;
                             startY = e.touches[0].clientY;
                             moveCursor(u, e.touches[0]);  // a plain tap already reads out
                         } else if (e.touches.length > 1) {
+                            // A further finger only re-seeds a running pinch: the
+                            // preview and the window to fall back on both stand
+                            if (!zoomTo) preZoom = u._zoomRange || null;
                             mode = 'pinch';
                             var f = fingers(e);
                             pinch = f.b - f.a < MIN_PINCH_PX ? null :
@@ -431,16 +456,27 @@ var CMCharts = (function() {
                         if (e.cancelable) e.preventDefault();
                     }, { passive: false });
                     u.over.addEventListener('touchend', function(e) {
-                        // A lifted first finger must not commit the pinch twice
-                        if (mode === 'pinch' && e.touches.length > 0) return;
-                        if (mode === 'pinch') commitPinch(u);
+                        if (e.touches.length > 0) {
+                            // Down to one finger: carry on as a scrub instead of
+                            // staying stuck in pinch mode. The pinched window is
+                            // still pending and commits when that finger lifts.
+                            if (mode === 'pinch' && e.touches.length === 1) {
+                                mode = 'pending';
+                                startX = e.touches[0].clientX;
+                                startY = e.touches[0].clientY;
+                                pinch = null;
+                            }
+                            return;
+                        }
+                        commitPinch(u);
                         mode = null;
                         pinch = null;
                     });
                     u.over.addEventListener('touchcancel', function() {
+                        // The browser took the gesture (a page scroll, usually)
+                        restorePreview(u);
                         mode = null;
                         pinch = null;
-                        zoomTo = null;
                     });
                 }]
             }
@@ -457,6 +493,7 @@ var CMCharts = (function() {
      * @param {Array<number>} lossIndices - Indices with packet loss.
      */
     function readoutPlugin(labels, bandByLabel, lossIndices) {
+        var readout = null;  // looked up once per render, not per cursor frame
         var lossSet = {};
         lossIndices.forEach(function(idx) { lossSet[idx] = true; });
 
@@ -484,15 +521,15 @@ var CMCharts = (function() {
         return {
             hooks: {
                 ready: [function() {
-                    var node = document.getElementById(READOUT_ID);
-                    if (!node) return;
+                    readout = document.getElementById(READOUT_ID);
+                    if (!readout) return;
                     // Shown from the first render on, so the first touch cannot push
                     // the chart down; the hint doubles as the cue that scrubbing exists.
-                    node.hidden = false;
-                    showHint(node);
+                    readout.hidden = false;
+                    showHint(readout);
                 }],
                 setCursor: [function(u) {
-                    var node = document.getElementById(READOUT_ID);
+                    var node = readout;
                     if (!node) return;
                     var idx = u.cursor.idx;
                     if (idx == null) { showHint(node); return; }
