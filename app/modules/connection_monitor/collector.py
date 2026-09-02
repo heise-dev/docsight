@@ -20,6 +20,11 @@ _CLEANUP_INTERVAL_S = 900
 _DEFAULT_POLL_INTERVAL_MS = 5000
 _MIN_POLL_INTERVAL_MS = 1000
 
+# Tolerance for the due check, a fraction of the 1 s base tick: a target whose
+# interval equals the tick must be due on every tick despite the few ms of
+# jitter in when a cycle reads the clock.
+_DUE_SLACK_S = 0.1
+
 
 def resolve_poll_interval_ms(config_mgr) -> int:
     """Configured probe interval in ms, tolerating unset/garbage values."""
@@ -100,7 +105,7 @@ class ConnectionMonitorCollector(Collector):
             for t in targets:
                 interval_s = t["poll_interval_ms"] / 1000.0
                 last = self._last_probe.get(t["id"], 0)
-                if now - last >= interval_s:
+                if now - last >= interval_s - _DUE_SLACK_S:
                     due.append(t)
 
             if not due:
