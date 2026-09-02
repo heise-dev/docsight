@@ -1,0 +1,80 @@
+name: Sync E2E case counts
+
+# Fork-only workflow (heise-dev/docsight, `deploy`): upstream carries the E2E
+# case count by hand in five files, so every task branch that adds a case
+# conflicts with every other one and with each moved `deploy`.  Here the counts
+# are recomputed from a live collection after each merge instead; task branches
+# never touch them.
+#
+# Loop safety: this job pushes with the default GITHUB_TOKEN, and GitHub does
+# not trigger workflow runs for pushes made with that token -- the sync commit
+# starts no further run of this workflow, of test.yml, or of docker.yml.
+# docker.yml would not rebuild for it in any case: its `paths:` filter is
+# app/**, tools/**, requirements.txt, Dockerfile, .dockerignore, entrypoint.sh,
+# .github/workflows/docker.yml, and none of the five count files match.
+
+on:
+  push:
+    branches: [deploy]
+
+permissions:
+  contents: write
+
+concurrency:
+  # Serialise, never cancel: a cancelled run would leave the counts stale.
+  group: e2e-count-sync-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync-counts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: deploy
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-test.txt
+
+      - name: Install dependencies
+        # Mirrors test.yml.  The E2E modules do `from playwright.sync_api import
+        # expect` at import time, so collection needs the Python package -- but
+        # no browser binaries (`playwright install` is deliberately absent):
+        # --collect-only never launches one.
+        run: |
+          pip install --require-hashes -r requirements.txt
+          pip install --require-hashes -r requirements-test.txt
+          pip install pytest-playwright==0.7.2 playwright==1.58.0
+
+      - name: Recompute the E2E case counts
+        run: python scripts/sync_e2e_counts.py
+
+      - name: Commit and push if the counts moved
+        env:
+          COUNT_FILES: >-
+            tests/e2e/shards.json
+            scripts/e2e_shards.py
+            tests/test_e2e_shards.py
+            tests/test_ci_workflow_contracts.py
+            .github/workflows/full-e2e.yml
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "counts already in sync; nothing to commit"
+            exit 0
+          fi
+          total=$(python -c "import json; print(json.load(open('tests/e2e/shards.json'))['expected_total'])")
+          # Stage only the count files: an unexpected stray change in the tree
+          # is then left behind rather than riding along in the sync commit.
+          git add -- $COUNT_FILES
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "chore: sync e2e counts to ${total}"
+          git push origin HEAD:deploy
