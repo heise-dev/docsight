@@ -58,6 +58,18 @@
         updateRefreshInterval();
     };
 
+    // Called by switchView when the view becomes visible: the refresh timer only
+    // ticks while the view is active, so without this the chart would keep the
+    // data it was last shown with until the next 10s/60s tick. No spinner — the
+    // last-known chart stays up until the response renders.
+    window.cmViewShown = function() {
+        if (targets.length === 0) return; // first load is still on its way in loadTargets()
+        if (pinnedDayView) return; // static data, timer deliberately stopped
+        if (zoomWindow && !zoomWindow.followLive) return;
+        loadData();
+        updateRefreshInterval();
+    };
+
     // Absolute bounds of the zoom window. A zoom taken at the live edge keeps its
     // span but slides with now, so new pings keep arriving in view.
     function getZoomWindow() {

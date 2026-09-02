@@ -276,6 +276,7 @@ var CORRELATION_CM_AVAILABLE = dashboardBootstrap.connectionMonitorAvailable;
     };
 
     function switchView(view, skipHash) {
+        var previousView = currentView;
         currentView = view;
         if (!skipHash) location.hash = view === 'live' ? '' : view;
         syncNavActiveState(view);
@@ -293,6 +294,9 @@ var CORRELATION_CM_AVAILABLE = dashboardBootstrap.connectionMonitorAvailable;
         // View-specific init callbacks
         if (view === 'live') {
             startAutoRefresh();
+            /* startAutoRefresh only restarts the countdown; without this the view
+               would keep showing pre-switch data until the next 60s tick. */
+            if (previousView !== 'live') refreshData();
         } else if (view === 'bqm') {
             if (typeof initBqmView === 'function') initBqmView();
         } else if (view === 'smokeping') {
@@ -320,6 +324,8 @@ var CORRELATION_CM_AVAILABLE = dashboardBootstrap.connectionMonitorAvailable;
             if (typeof initComparison === 'function') initComparison();
         } else if (view === 'evidence') {
             if (typeof initEvidence === 'function') initEvidence();
+        } else if (view === 'connection-monitor') {
+            if (previousView !== view && typeof window.cmViewShown === 'function') window.cmViewShown();
         } else if (view.indexOf('mod-') === 0) {
             /* Generic module init: mod-docsight-comparison → initComparison */
             var parts = view.replace('mod-docsight-', '').split('-');
