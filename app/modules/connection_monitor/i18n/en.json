@@ -36,6 +36,8 @@
   "cm_timerange": "Time range",
   "cm_latency_chart": "Latency",
   "cm_chart_loading": "Loading…",
+  "cm_chart_readout_hint": "Touch the chart to read values",
+  "cm_chart_readout_loss": "loss",
   "cm_toggle_band": "band",
   "cm_toggle_loss_markers": "loss markers",
   "cm_toggle_clip_spikes": "clip spikes",

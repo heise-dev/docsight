@@ -358,6 +358,45 @@
     opacity: 0.4;
 }
 
+/* Fixed value readout above the plot, shown in place of the floating tooltip on
+   touch devices: the finger never covers it and it cannot flip off a narrow plot.
+   Stays hidden until the chart declares it (see readoutPlugin). */
+.cm-chart-readout {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 12px;
+    min-height: 18px;
+    margin-bottom: 4px;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.cm-chart-readout[hidden] {
+    display: none;
+}
+
+.cm-chart-readout-time {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.cm-chart-readout-chip {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+}
+
+.cm-chart-readout-hint {
+    color: var(--text-muted);
+}
+
+.cm-chart-readout-loss {
+    color: var(--crit);
+    font-weight: 600;
+}
+
 /* Controls strip below the chart: replaces uPlot's built-in legend. The target
    list keeps its own column so the global toggles can sit on the right edge. */
 .cm-chart-controls {

@@ -73,6 +73,10 @@
                      data-label-1hr="{{ t.get('docsight.connection_monitor.cm_resolution_1hr', '1-hour averages') }}"
                 ></div>
             </div>
+            <div id="cm-chart-readout" class="cm-chart-readout" aria-live="polite"
+                 data-l-hint="{{ t.get('docsight.connection_monitor.cm_chart_readout_hint', 'Touch the chart to read values') }}"
+                 data-l-loss="{{ t.get('docsight.connection_monitor.cm_chart_readout_loss', 'loss') }}"
+                 hidden></div>
             <div id="cm-combined-chart" class="cm-chart-mount"></div>
             <div id="cm-chart-controls" class="cm-chart-controls"
                  data-l-band="{{ t.get('docsight.connection_monitor.cm_toggle_band', 'band') }}"

@@ -387,6 +387,9 @@ def test_connection_monitor_controls_strip_replaces_the_builtin_legend(demo_page
     _reload_cm_range(page, 86400)
 
     expect(page.locator("#cm-combined-chart .u-legend")).to_have_count(0)
+    # A fine pointer keeps the floating tooltip; the touch readout stays out of the way
+    expect(page.locator("#cm-combined-chart .uplot-tooltip")).to_have_count(1)
+    expect(page.locator("#cm-chart-readout")).to_be_hidden()
     target_rows = page.locator(
         "#cm-chart-controls .cm-chart-control-row:not(.cm-chart-control-globals)"
     )
@@ -1218,3 +1221,239 @@ def test_connection_monitor_outage_rows_mark_bucket_derived_windows(demo_page):
     marker = rows.nth(1).locator("td").nth(1).locator(".cm-approx")
     expect(marker).to_have_count(1)
     assert "minute-snapped" in marker.get_attribute("title").lower()
+
+
+TOUCH_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+)
+
+
+def _touch_context(browser):
+    """A phone-sized context with real touch input.
+
+    The function-scoped ``page``/``demo_page`` fixtures have no touch, so the touch
+    cases open their own context. ``is_mobile``/``has_touch`` already make
+    ``matchMedia('(pointer: coarse)')`` match, which is what switches the chart to
+    the readout - no ``Emulation.setEmulatedMedia`` needed.
+    """
+    return browser.new_context(
+        viewport={"width": 390, "height": 844},
+        device_scale_factor=3,
+        is_mobile=True,
+        has_touch=True,
+        user_agent=TOUCH_USER_AGENT,
+    )
+
+
+def _touch(cdp, kind, points):
+    """Dispatch one touch event; Playwright's sync API has no multi-touch gesture."""
+    cdp.send("Input.dispatchTouchEvent", {"type": kind, "touchPoints": points})
+
+
+def _pinch(cdp, page, y, left, right, spread, finish="touchEnd"):
+    """Two fingers moving apart (positive spread) or together (negative), then finish."""
+    _touch(cdp, "touchStart", [{"x": left, "y": y, "id": 0}, {"x": right, "y": y, "id": 1}])
+    for step in range(1, 11):
+        offset = spread * step / 10
+        _touch(cdp, "touchMove", [{"x": left - offset, "y": y, "id": 0},
+                                  {"x": right + offset, "y": y, "id": 1}])
+        page.wait_for_timeout(40)
+    _touch(cdp, finish, [])
+
+
+def _prepare_touch_chart(page, live_server, stub=None):
+    """Open the combined chart in a touch context and return the plot geometry.
+
+    ``stub`` runs before the first navigation, so a route stub already serves the
+    first fetch and the page is loaded exactly once.
+    """
+    if stub is not None:
+        stub(page)
+    page.goto(live_server)
+    page.wait_for_load_state("networkidle")
+    page.evaluate("switchView('connection-monitor')")
+    page.wait_for_selector("#view-connection-monitor.active", state="visible")
+    page.wait_for_function(
+        "() => window.charts && window.charts['cm-combined-chart']"
+        " && window.charts['cm-combined-chart'].data[0].length > 10"
+    )
+    # Showing the view refetches, so let that land before anything waits on a rebuild
+    page.wait_for_load_state("networkidle")
+    # Freeze the poll: a rebuild mid-gesture drops the touch listeners with the old
+    # instance (they live on u.over), which would make the gesture look ignored
+    page.evaluate(
+        "() => { const last = setInterval(() => {}, 1e6);"
+        " for (let i = 1; i <= last; i++) clearInterval(i); }"
+    )
+    page.evaluate(
+        "() => window.charts['cm-combined-chart'].over.scrollIntoView({block: 'center'})"
+    )
+    return page.evaluate(
+        """() => {
+            const rect = window.charts['cm-combined-chart'].over.getBoundingClientRect();
+            return {left: rect.left, top: rect.top, width: rect.width, height: rect.height};
+        }"""
+    )
+
+
+def test_connection_monitor_touch_fills_the_readout_instead_of_a_tooltip(browser, live_server):
+    """On a touch device the values belong above the chart, not under the finger."""
+    context = _touch_context(browser)
+    page = context.new_page()
+    try:
+        geometry = _prepare_touch_chart(page, live_server)
+        cdp = context.new_cdp_session(page)
+        centre = {"x": geometry["left"] + geometry["width"] * 0.5,
+                  "y": geometry["top"] + geometry["height"] * 0.5}
+
+        _touch(cdp, "touchStart", [centre])
+        _touch(cdp, "touchEnd", [])
+
+        readout = page.locator("#cm-chart-readout")
+        expect(readout).to_be_visible()
+        expect(readout.locator(".cm-chart-readout-time")).to_have_text(re.compile(r"\d+:\d\d"))
+        targets = page.locator("#cm-chart-controls [data-toggle='line']")
+        chips = readout.locator(".cm-chart-readout-chip")
+        # One chip per visible target, minus any whose sample at that index is null
+        assert 1 <= chips.count() <= targets.count()
+        # The floating tooltip is what the readout replaces here
+        assert page.locator("#cm-combined-chart .uplot-tooltip").count() == 0
+
+        # A target switched off in the strip loses its chip too. Tapped, not clicked:
+        # a real mouse click parks the pointer on the button, and the compat
+        # mouseleave that follows the next tap would clear uPlot's cursor again.
+        expected = chips.count()
+        page.evaluate("() => { window.charts['cm-combined-chart']._e2eStale = true; }")
+        page.locator("#cm-chart-controls [data-toggle='line'] >> nth=0").tap()
+        page.wait_for_function(
+            "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._e2eStale"
+        )
+        _touch(cdp, "touchStart", [centre])
+        _touch(cdp, "touchEnd", [])
+        expect(chips).to_have_count(expected - 1)
+    finally:
+        context.close()
+
+
+def test_connection_monitor_one_finger_drag_scrubs_the_cursor(browser, live_server):
+    """A finger dragged across the plot must walk the cursor, not scroll the page."""
+    context = _touch_context(browser)
+    page = context.new_page()
+    try:
+        geometry = _prepare_touch_chart(page, live_server)
+        cdp = context.new_cdp_session(page)
+        y = geometry["top"] + geometry["height"] * 0.5
+        start = geometry["left"] + geometry["width"] * 0.25
+        end = geometry["left"] + geometry["width"] * 0.75
+
+        scroll_before = page.evaluate("() => window.scrollY")
+        _touch(cdp, "touchStart", [{"x": start, "y": y}])
+        midway = None
+        for step in range(1, 11):
+            _touch(cdp, "touchMove", [{"x": start + (end - start) * step / 10, "y": y}])
+            page.wait_for_timeout(40)
+            if step == 5:
+                midway = page.evaluate("() => window.charts['cm-combined-chart'].cursor.idx")
+        final = page.evaluate("() => window.charts['cm-combined-chart'].cursor.idx")
+        _touch(cdp, "touchEnd", [])
+
+        assert midway is not None, "the cursor must follow the finger while it moves"
+        assert final is not None
+        assert midway < final, "a left-to-right scrub must walk the cursor forward"
+        # The scrub is swallowed, so the page underneath must not have moved
+        assert page.evaluate("() => window.scrollY") == scroll_before
+
+        # A second finger that comes and goes must hand the gesture back to the scrub.
+        # CDP's touchEnd takes the points being RELEASED (an empty list ends them all),
+        # so this lifts finger 1 and keeps scrubbing with finger 0.
+        _touch(cdp, "touchStart", [{"x": start, "y": y, "id": 0}])
+        _touch(cdp, "touchStart", [{"x": start, "y": y, "id": 0},
+                                   {"x": end, "y": y, "id": 1}])
+        _touch(cdp, "touchEnd", [{"x": end, "y": y, "id": 1}])
+        _touch(cdp, "touchMove", [{"x": end, "y": y, "id": 0}])
+        page.wait_for_timeout(40)
+        resumed = page.evaluate("() => window.charts['cm-combined-chart'].cursor.idx")
+        _touch(cdp, "touchEnd", [])
+        assert resumed is not None and resumed > midway, (
+            "a transient second finger must not leave the scrub stuck in pinch mode"
+        )
+    finally:
+        context.close()
+
+
+def test_connection_monitor_pinch_zooms_and_refetches_the_window(browser, live_server):
+    """Pinching out must commit the visible window like a drag-select does."""
+    context = _touch_context(browser)
+    page = context.new_page()
+    try:
+        state = {}
+        geometry = _prepare_touch_chart(
+            page, live_server,
+            stub=lambda target: _stub_connection_monitor_api(target, state=state),
+        )
+        cdp = context.new_cdp_session(page)
+        before = state["requests"][-1]
+
+        y = geometry["top"] + geometry["height"] * 0.5
+        page.evaluate("() => { window.charts['cm-combined-chart']._e2eStale = true; }")
+        _pinch(cdp, page, y,
+               geometry["left"] + geometry["width"] * 0.42,
+               geometry["left"] + geometry["width"] * 0.58,
+               geometry["width"] * 0.3)
+        page.wait_for_function(
+            "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._e2eStale"
+        )
+
+        assert page.evaluate("() => window.cmHasZoomWindow()") is True
+        window = state["requests"][-1]
+        assert window["start"] > before["start"], "the pinched window must start later"
+        assert window["end"] < before["end"], "the pinched window must end earlier"
+        expect(page.locator("#cm-combined-chart button", has_text="Reset Zoom")).to_be_visible()
+
+        # Pinching back in is the phone's undo - there is no double-click there
+        page.evaluate("() => { window.charts['cm-combined-chart']._e2eStale = true; }")
+        _pinch(cdp, page, y,
+               geometry["left"] + geometry["width"] * 0.15,
+               geometry["left"] + geometry["width"] * 0.85,
+               -geometry["width"] * 0.28)
+        page.wait_for_function(
+            "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._e2eStale"
+        )
+
+        assert page.evaluate("() => window.cmHasZoomWindow()") is False
+        restored = state["requests"][-1]
+        assert restored["start"] <= window["start"] and restored["end"] >= window["end"], (
+            "pinching out must refetch the range the zoom came from"
+        )
+        expect(page.locator("#cm-combined-chart button", has_text="Reset Zoom")).to_be_hidden()
+    finally:
+        context.close()
+
+
+def test_connection_monitor_abandoned_pinch_leaves_no_zoom_behind(browser, live_server):
+    """A pinch the browser cancels must not strand an index-space zoom on the chart.
+
+    A stranded _zoomRange survives every poll (the x-domain key is unchanged) and
+    drifts by the samples each poll appends, with only Reset Zoom to recover.
+    """
+    context = _touch_context(browser)
+    page = context.new_page()
+    try:
+        geometry = _prepare_touch_chart(page, live_server)
+        cdp = context.new_cdp_session(page)
+        before = _cm_scales(page)
+        assert before["zoom"] is None
+
+        _pinch(cdp, page, geometry["top"] + geometry["height"] * 0.5,
+               geometry["left"] + geometry["width"] * 0.42,
+               geometry["left"] + geometry["width"] * 0.58,
+               geometry["width"] * 0.3, finish="touchCancel")
+
+        after = _cm_scales(page)
+        assert after["zoom"] is None, "an abandoned pinch must not leave a zoom range behind"
+        assert after["xMin"] == before["xMin"] and after["xMax"] == before["xMax"]
+        assert page.evaluate("() => window.cmHasZoomWindow()") is False
+        expect(page.locator("#cm-combined-chart button", has_text="Reset Zoom")).to_be_hidden()
+    finally:
+        context.close()

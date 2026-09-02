@@ -17,11 +17,18 @@ var CMCharts = (function() {
     ];
 
     var CONTROLS_ID = 'cm-chart-controls';
+    var READOUT_ID = 'cm-chart-readout';
     var CONTROLS_STORAGE_KEY = 'docsight-cm-chart-controls';
     /* Clip the y ceiling to this percentile of the visible lines, but only when the
        plain maximum sits more than CLIP_EXCESS above it - i.e. a real outlier. */
     var CLIP_PERCENTILE = 0.99;
     var CLIP_EXCESS = 1.25;
+
+    /* A one-finger move shorter than this is still undecided, so the browser keeps
+       its chance to turn the gesture into a vertical page scroll. */
+    var TOUCH_SLOP = 8;
+    /* Two fingers closer together than this make the pinch ratio explode. */
+    var MIN_PINCH_PX = 24;
 
     /* Controls strip state; the single source of truth for series visibility. */
     var controls = loadControls();
@@ -273,22 +280,11 @@ var CMCharts = (function() {
                     u.over.style.cursor = 'crosshair';
                     // Hint: show drag-to-zoom tooltip on first hover
                     u.over.title = 'Drag to zoom, double-click to reset';
-                }],
-                ready: [function(u) {
-                    u.over.addEventListener('dblclick', function() {
-                        clearZoom(u);
-                        hideResetBtn(u);
-                    });
-                    // A zoomed refetch builds a chart whose x-domain IS the zoom
-                    // window, so no setScale follows to raise the button.
-                    if (isZoomed(u)) showResetBtn(u);
-                }],
-                setSelect: [function(u) {
-                    var min = u.posToVal(u.select.left, 'x');
-                    var max = u.posToVal(u.select.left + u.select.width, 'x');
-                    if (max - min > 1) {
-                        // Zoom the current render straight away for instant feedback;
-                        // the refetch of the same window then replaces it.
+                    // Commit an index window as the zoom: instant preview plus the
+                    // absolute window every following fetch asks for. The touch
+                    // plugin's pinch commits through this too, so a drag and a
+                    // pinch can never drift apart.
+                    u._cmZoomTo = function(min, max) {
                         u._zoomRange = { min: min, max: max };
                         setYZoom(u, min, max);
                         u.setScale('x', u._zoomRange);
@@ -300,7 +296,28 @@ var CMCharts = (function() {
                             window.cmSetZoomWindow(indexToTime(min), indexToTime(max),
                                 max >= timestamps.length - 2);
                         }
-                    }
+                    };
+                    // Undo the zoom, window and all. A phone has no double-click, so
+                    // the touch plugin's pinch-out goes through the same path.
+                    u._cmZoomClear = function() {
+                        clearZoom(u);
+                        hideResetBtn(u);
+                    };
+                }],
+                ready: [function(u) {
+                    u.over.addEventListener('dblclick', function() {
+                        u._cmZoomClear();
+                    });
+                    // A zoomed refetch builds a chart whose x-domain IS the zoom
+                    // window, so no setScale follows to raise the button.
+                    if (isZoomed(u)) showResetBtn(u);
+                }],
+                setSelect: [function(u) {
+                    var min = u.posToVal(u.select.left, 'x');
+                    var max = u.posToVal(u.select.left + u.select.width, 'x');
+                    // Zoom the current render straight away for instant feedback;
+                    // the refetch of the same window then replaces it.
+                    if (max - min > 1) u._cmZoomTo(min, max);
                     u.setSelect({ left: 0, width: 0, top: 0, height: 0 }, false);
                 }],
                 // Covers the restored zoom of a re-rendered chart, where the
@@ -308,6 +325,241 @@ var CMCharts = (function() {
                 setScale: [function(u) {
                     if (isZoomed(u)) showResetBtn(u);
                     else hideResetBtn(u);
+                }]
+            }
+        };
+    }
+
+    /**
+     * uPlot plugin: one-finger scrub and two-finger pinch zoom.
+     * uPlot 1.6 is mouse-only, so a phone gets no cursor and no zoom at all. Only
+     * pushed on a coarse pointer (see renderCombinedChart). The listeners sit on
+     * u.over and die with the instance, like the dblclick binding in zoomPlugin.
+     */
+    function touchPlugin() {
+        var rect = null;    // u.over's viewport rect, taken at gesture start
+        var mode = null;    // 'pending' | 'scrub' | 'scroll' | 'pinch'
+        var startX = 0;
+        var startY = 0;
+        var pinch = null;   // x values under the two fingers when the pinch started
+        var zoomTo = null;  // last window the pinch applied; null = nothing to commit
+        var preZoom = null; // _zoomRange before the pinch, to fall back on if it is abandoned
+
+        function moveCursor(u, touch) {
+            // Drives u.cursor and every setCursor hook - readout included
+            u.setCursor({ left: touch.clientX - rect.left, top: touch.clientY - rect.top });
+        }
+
+        // The two finger positions in plot pixels, left one first
+        function fingers(e) {
+            var a = e.touches[0].clientX - rect.left;
+            var b = e.touches[1].clientX - rect.left;
+            return a <= b ? { a: a, b: b } : { a: b, b: a };
+        }
+
+        // Keep the value under each finger where the finger is: the span scales with
+        // the distance between them, so the same gesture zooms and pans in one move.
+        function scaleTo(u, e) {
+            var f = fingers(e);
+            if (f.b - f.a < MIN_PINCH_PX || rect.width <= 0) return;
+            var span = rect.width * (pinch.b - pinch.a) / (f.b - f.a);
+            var min = pinch.a - f.a * span / rect.width;
+            var max = min + span;
+            // Clamped to the loaded data: pinching out past it has nothing to show
+            var last = u.data[0].length - 1;
+            if (min < 0) min = 0;
+            if (max > last) max = last;
+            if (max - min <= 1) return;
+            zoomTo = { min: min, max: max };
+            // The engine's x range fn reads _zoomRange, so the live preview needs it
+            // set - _cmZoomTo then commits the same window on touchend.
+            u._zoomRange = zoomTo;
+            u.setScale('x', zoomTo);
+        }
+
+        // A poll rebuild during the gesture destroys the instance while these
+        // listeners live on in the old u.over; nothing may be written to it then.
+        function alive(u) {
+            return u.root && u.root.isConnected;
+        }
+
+        // Put an abandoned gesture back: only a commit may keep the preview's
+        // _zoomRange, which the engine would otherwise re-apply on every poll.
+        function restorePreview(u) {
+            if (!zoomTo) return;
+            zoomTo = null;
+            if (!alive(u)) return;
+            u._zoomRange = preZoom;
+            u.setScale('x', preZoom || { min: 0, max: u.data[0].length - 1 });
+        }
+
+        function commitPinch(u) {
+            if (!zoomTo) return;  // a pinch that never moved has nothing to commit
+            if (!alive(u)) { zoomTo = null; return; }
+            var last = u.data[0].length - 1;
+            // Pinched back out to the full view: on a phone this is the undo
+            // gesture, so it clears a committed window like the desktop dblclick.
+            if (zoomTo.min <= 0 && zoomTo.max >= last) {
+                if (typeof u._cmZoomClear === 'function') u._cmZoomClear();
+            } else if (typeof u._cmZoomTo === 'function') {
+                u._cmZoomTo(zoomTo.min, zoomTo.max);
+            }
+            zoomTo = null;
+        }
+
+        return {
+            hooks: {
+                init: [function(u) {
+                    // Vertical page scrolling stays the browser's, horizontal moves and
+                    // pinches are ours - and it never page-zooms on the plot.
+                    u.over.style.touchAction = 'pan-y';
+                }],
+                ready: [function(u) {
+                    u.over.addEventListener('touchstart', function(e) {
+                        rect = u.over.getBoundingClientRect();
+                        if (e.touches.length === 1) {
+                            mode = 'pending';
+                            startX = e.touches[0].clientX;
+                            startY = e.touches[0].clientY;
+                            moveCursor(u, e.touches[0]);  // a plain tap already reads out
+                        } else if (e.touches.length > 1) {
+                            // A further finger only re-seeds a running pinch: the
+                            // preview and the window to fall back on both stand
+                            if (!zoomTo) preZoom = u._zoomRange || null;
+                            mode = 'pinch';
+                            var f = fingers(e);
+                            pinch = f.b - f.a < MIN_PINCH_PX ? null :
+                                { a: u.posToVal(f.a, 'x'), b: u.posToVal(f.b, 'x') };
+                        }
+                    }, { passive: true });
+                    u.over.addEventListener('touchmove', function(e) {
+                        if (mode === 'pinch') {
+                            if (!pinch || e.touches.length < 2) return;
+                            scaleTo(u, e);
+                            if (e.cancelable) e.preventDefault();
+                            return;
+                        }
+                        if (mode === 'scroll' || mode === null || e.touches.length !== 1) return;
+                        var touch = e.touches[0];
+                        if (mode === 'pending') {
+                            var dx = Math.abs(touch.clientX - startX);
+                            var dy = Math.abs(touch.clientY - startY);
+                            if (dx < TOUCH_SLOP && dy < TOUCH_SLOP) return;
+                            // A mostly vertical move belongs to the page, not the chart,
+                            // and stays that way until the finger comes off again
+                            mode = dy > dx ? 'scroll' : 'scrub';
+                            if (mode === 'scroll') return;
+                        }
+                        moveCursor(u, touch);
+                        // Only the horizontal scrub is ours to swallow; touch-action
+                        // already leaves the vertical pan to the browser
+                        if (e.cancelable) e.preventDefault();
+                    }, { passive: false });
+                    u.over.addEventListener('touchend', function(e) {
+                        if (e.touches.length > 0) {
+                            // Down to one finger: carry on as a scrub instead of
+                            // staying stuck in pinch mode. The pinched window is
+                            // still pending and commits when that finger lifts.
+                            if (mode === 'pinch' && e.touches.length === 1) {
+                                mode = 'pending';
+                                startX = e.touches[0].clientX;
+                                startY = e.touches[0].clientY;
+                                pinch = null;
+                            }
+                            return;
+                        }
+                        commitPinch(u);
+                        mode = null;
+                        pinch = null;
+                    });
+                    u.over.addEventListener('touchcancel', function() {
+                        // The browser took the gesture (a page scroll, usually)
+                        restorePreview(u);
+                        mode = null;
+                        pinch = null;
+                    });
+                }]
+            }
+        };
+    }
+
+    /**
+     * uPlot plugin: fill the fixed readout above the plot from the cursor.
+     * A floating tooltip sits under the finger and flips off a ~260px plot, so on a
+     * coarse pointer the values live in their own strip instead - which is also why
+     * renderCombinedChart drops the tooltip there (tooltip:false).
+     * @param {Array<string>} labels - X axis label per index (the sample time).
+     * @param {Object} bandByLabel - Line label -> {min, max} arrays, as the tooltip uses.
+     * @param {Array<number>} lossIndices - Indices with packet loss.
+     */
+    function readoutPlugin(labels, bandByLabel, lossIndices) {
+        var readout = null;  // looked up once per render, not per cursor frame
+        var lossSet = {};
+        lossIndices.forEach(function(idx) { lossSet[idx] = true; });
+
+        function showHint(node) {
+            node.textContent = '';
+            var hint = document.createElement('span');
+            hint.className = 'cm-chart-readout-hint';
+            hint.textContent = node.dataset.lHint || 'Touch the chart to read values';
+            node.appendChild(hint);
+        }
+
+        function chip(color, text) {
+            var span = document.createElement('span');
+            span.className = 'cm-chart-readout-chip';
+            var dot = document.createElement('span');
+            dot.className = 'cm-target-dot';
+            dot.style.background = color;
+            span.appendChild(dot);
+            var label = document.createElement('span');
+            label.textContent = text;
+            span.appendChild(label);
+            return span;
+        }
+
+        return {
+            hooks: {
+                ready: [function() {
+                    readout = document.getElementById(READOUT_ID);
+                    if (!readout) return;
+                    // Shown from the first render on, so the first touch cannot push
+                    // the chart down; the hint doubles as the cue that scrubbing exists.
+                    readout.hidden = false;
+                    showHint(readout);
+                }],
+                setCursor: [function(u) {
+                    var node = readout;
+                    if (!node) return;
+                    var idx = u.cursor.idx;
+                    if (idx == null) { showHint(node); return; }
+                    node.textContent = '';
+                    var time = document.createElement('span');
+                    time.className = 'cm-chart-readout-time';
+                    time.textContent = labels[idx] || '';
+                    node.appendChild(time);
+                    // Band helpers carry show:false, so only the visible lines chip up
+                    for (var i = 1; i < u.series.length; i++) {
+                        var s = u.series[i];
+                        if (!s.show) continue;
+                        var val = u.data[i][idx];
+                        if (val == null) continue;
+                        var text = s.label + ' ' + val.toFixed(1) + ' ms';
+                        var band = bandByLabel[s.label];
+                        if (band && band.min[idx] != null && band.max[idx] != null) {
+                            text += ' (min ' + band.min[idx].toFixed(1) +
+                                ' \u00b7 max ' + band.max[idx].toFixed(1) + ')';
+                        }
+                        var color = s._stroke || s.stroke;
+                        if (typeof color === 'function') color = color(u, i);
+                        node.appendChild(chip(color, text));
+                    }
+                    if (lossSet[idx]) {
+                        var loss = document.createElement('span');
+                        loss.className = 'cm-chart-readout-loss';
+                        loss.textContent = node.dataset.lLoss || 'loss';
+                        node.appendChild(loss);
+                    }
                 }]
             }
         };
@@ -560,10 +812,18 @@ var CMCharts = (function() {
             { yMin: 0, yMax: yMax }
         ];
 
+        // uPlot 1.6 has no touch handling, so a coarse pointer gets the scrub/pinch
+        // plugin and reads the values from the fixed strip above the plot instead of
+        // a tooltip the finger covers. Desktop keeps drag-zoom and the tooltip.
+        var touchUi = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+        var touchPlugins = touchUi ?
+            [touchPlugin(), readoutPlugin(labels, bandByLabel, lossIndices)] : [];
+
         renderChart(containerId, labels, datasets, 'line', zones, {
             yMin: 0,
             zoomable: true,
             legend: false,
+            tooltip: !touchUi,
             // Only a clipped ceiling may stay below the data; otherwise widen as before
             yMaxStrict: ceiling < dataMax,
             xDomainKey: domainKey !== undefined && domainKey !== null ? domainKey : axisRange,
@@ -587,7 +847,8 @@ var CMCharts = (function() {
                 return text;
             },
             plugins: [lossMarkersPlugin(lossIndices, controls.loss),
-                clipHintsPlugin(clipIndices), zoomPlugin(timestamps)].concat(bandPlugins)
+                clipHintsPlugin(clipIndices), zoomPlugin(timestamps)]
+                .concat(bandPlugins).concat(touchPlugins)
         });
     }
 
