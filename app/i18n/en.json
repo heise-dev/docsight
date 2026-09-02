@@ -879,6 +879,7 @@
   "seg_range_7d": "7d",
   "seg_range_30d": "30d",
   "seg_range_all": "All",
+  "seg_smooth": "Smooth",
   "seg_note": "Segment utilization values are estimates provided by the FRITZ!Box and may differ from actual CMTS-wide load.",
   "seg_disabled": "Segment utilization is disabled in Settings.",
   "seg_unsupported_driver": "This view is only available for FRITZ!Box cable devices.",

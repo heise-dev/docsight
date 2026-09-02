@@ -879,6 +879,7 @@
   "seg_range_7d": "7d",
   "seg_range_30d": "30d",
   "seg_range_all": "Alle",
+  "seg_smooth": "Udjævning",
   "seg_note": "Segmentudnyttelsesværdier er estimater leveret af FRITZ!Box og kan afvige fra den faktiske CMTS-dækkende belastning.",
   "seg_disabled": "Segmentudnyttelse er deaktiveret i Indstillinger.",
   "seg_unsupported_driver": "Denne visning er kun tilgængelig for FRITZ!Box kabelenheder.",

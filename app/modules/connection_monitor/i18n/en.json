@@ -39,6 +39,7 @@
   "cm_toggle_band": "band",
   "cm_toggle_loss_markers": "loss markers",
   "cm_toggle_clip_spikes": "clip spikes",
+  "cm_toggle_smooth": "smooth",
   "cm_toggle_no_band": "No min/max values in this view",
   "cm_loss_chart": "Packet Loss",
   "cm_availability_chart": "Availability",

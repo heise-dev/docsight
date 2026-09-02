@@ -879,6 +879,7 @@
   "seg_range_7d": "7.d",
   "seg_range_30d": "30.d",
   "seg_range_all": "Viss",
+  "seg_smooth": "Izlīdzināšana",
   "seg_note": "Segmenta izmantošanas vērtības ir FRITZ!Box sniegtās aplēses, un tās var atšķirties no faktiskās CMTS mēroga slodzes.",
   "seg_disabled": "Segmentu izmantošana ir atspējota sadaļā Iestatījumi.",
   "seg_unsupported_driver": "Šis skats ir pieejams tikai FRITZ!Box kabeļa ierīcēm.",

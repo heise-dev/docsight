@@ -879,6 +879,7 @@
   "seg_range_7d": "7 p",
   "seg_range_30d": "30d",
   "seg_range_all": "Kõik",
+  "seg_smooth": "Silumine",
   "seg_note": "Segmendi kasutusväärtused on FRITZ!Box hinnangulised ja võivad erineda tegelikust CMTS-i hõlmavast koormusest.",
   "seg_disabled": "Segmendi kasutamine on seadetes keelatud.",
   "seg_unsupported_driver": "See vaade on saadaval ainult FRITZ!Box kaabelseadmete jaoks.",

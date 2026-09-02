@@ -251,6 +251,17 @@ def _cm_series(page):
     )
 
 
+def _cm_smoothed(page):
+    """Whether each series of the combined chart uses uPlot's spline path builder."""
+    return page.evaluate(
+        """() => {
+            const spline = uPlot.paths.spline().toString();
+            return window.charts['cm-combined-chart'].series.slice(1).map(
+                (s) => ({label: s.label, spline: !!s.paths && s.paths.toString() === spline}));
+        }"""
+    )
+
+
 def _cm_chart_flags(page):
     """Which optional chart-controls features the live instance was built with."""
     return page.evaluate(
@@ -380,7 +391,7 @@ def test_connection_monitor_controls_strip_replaces_the_builtin_legend(demo_page
         "#cm-chart-controls .cm-chart-control-row:not(.cm-chart-control-globals)"
     )
     expect(target_rows).to_have_count(4)
-    expect(page.locator("#cm-chart-controls .cm-chart-control-globals .cm-chart-toggle")).to_have_count(2)
+    expect(page.locator("#cm-chart-controls .cm-chart-control-globals .cm-chart-toggle")).to_have_count(3)
     expect(page.locator("#cm-chart-controls [data-toggle='line']")).to_have_count(4)
     expect(page.locator("#cm-chart-controls [data-toggle='band']")).to_have_count(4)
 
@@ -503,6 +514,67 @@ def test_connection_monitor_band_toggle_drops_the_envelope_and_the_y_ceiling(dem
     assert _cm_chart_flags(page)["clipHints"] > 0, "a clipped band envelope must be hinted too"
 
 
+def _cm_band_pixels(page):
+    """Sample the rendered canvas inside and above the min/max band.
+
+    The band spans the whole window, so a column at either plot edge must look
+    exactly like a column in the middle; a column above the band max must not.
+    """
+    return page.evaluate(
+        """() => {
+            const u = window.charts['cm-combined-chart'];
+            const bb = u.bbox;
+            const yOf = (v) => Math.round(u.valToPos(v, 'y', true));
+            const read = (x, y) => Array.from(u.ctx.getImageData(x, y, 1, 1).data);
+            return {
+                idxs: u.series[0].idxs.slice(),
+                points: u.data[0].length,
+                leftInBand: read(bb.left + 1, yOf(200)),
+                centreInBand: read(bb.left + Math.round(bb.width / 2), yOf(200)),
+                rightInBand: read(bb.left + bb.width - 2, yOf(200)),
+                leftAboveBand: read(bb.left + 1, yOf(430)),
+            };
+        }"""
+    )
+
+
+def test_connection_monitor_zoomed_band_reaches_both_plot_edges(demo_page):
+    """A zoomed band must be drawn edge to edge, like the line, not clipped to the visible indices."""
+    page = demo_page
+    # Few, widely spaced samples: one index is ~1/5th of the plot, so a band
+    # clipped to the visible indices leaves an unmistakable gap at each edge.
+    _stub_connection_monitor_api(page, sample_count=12, outlier_index=-1, band_max=400)
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+
+    # A pure view zoom, exactly what the CM pre-refetch preview and every BQM
+    # drag do: _zoomRange first, because the engine's x-range fn reads it.
+    # The bounds sit between samples, so the visible index window is [3, 7].
+    page.evaluate(
+        """() => {
+            const u = window.charts['cm-combined-chart'];
+            u._zoomRange = {min: 2.4, max: 7.6};
+            u.setScale('x', u._zoomRange);
+        }"""
+    )
+    page.wait_for_function(
+        "() => window.charts['cm-combined-chart'].scales.x.min > 0"
+    )
+
+    probe = _cm_band_pixels(page)
+    assert probe["idxs"][0] > 0 and probe["idxs"][1] < probe["points"] - 1, (
+        f"the probe must actually be zoomed into a sub-window: {probe['idxs']} of {probe['points']}"
+    )
+    assert probe["leftInBand"] != probe["leftAboveBand"], (
+        "the band must be painted at all - inside and above it look identical"
+    )
+    assert probe["leftInBand"] == probe["centreInBand"], (
+        "the band must reach the left plot edge, not stop at the first visible index"
+    )
+    assert probe["rightInBand"] == probe["centreInBand"], (
+        "the band must reach the right plot edge, not stop at the last visible index"
+    )
+
 def test_connection_monitor_loss_marker_toggle_removes_the_markers(demo_page):
     """The packet-loss markers must be switchable off and stay off across a reload."""
     page = demo_page
@@ -519,6 +591,40 @@ def test_connection_monitor_loss_marker_toggle_removes_the_markers(demo_page):
     assert _cm_chart_flags(page)["lossMarkers"] is False, "the loss toggle must survive a reload"
     expect(page.locator("#cm-chart-controls [data-toggle='loss']")).to_have_attribute(
         "aria-pressed", "false"
+    )
+
+
+def test_connection_monitor_smooth_toggle_splines_the_line_and_its_band(demo_page):
+    """Smoothing is opt-in, covers the band helpers too, and survives a reload."""
+    page = demo_page
+    _stub_connection_monitor_api(page, outlier_index=-1, band_max=400, loss_index=7)
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+
+    assert [s["spline"] for s in _cm_smoothed(page)] == [False, False, False], (
+        "smoothing must stay off until the user asks for it"
+    )
+    smooth_toggle = page.locator("#cm-chart-controls [data-toggle='smooth']")
+    expect(smooth_toggle).to_have_attribute("aria-pressed", "false")
+
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='smooth']")
+    smoothed = _cm_smoothed(page)
+    assert [s["spline"] for s in smoothed] == [True, True, True], (
+        f"the line and both band helpers must share the spline builder: {smoothed}"
+    )
+    expect(smooth_toggle).to_have_attribute("aria-pressed", "true")
+    assert _cm_chart_flags(page)["lossMarkers"] is True, "smoothing must not disturb the other controls"
+
+    _open_connection_monitor_chart(page)
+    _reload_cm_range(page, 86400)
+    assert [s["spline"] for s in _cm_smoothed(page)] == [True, True, True], (
+        "the smooth toggle must survive a page reload"
+    )
+    expect(smooth_toggle).to_have_attribute("aria-pressed", "true")
+
+    _cm_toggle(page, "#cm-chart-controls [data-toggle='smooth']")
+    assert [s["spline"] for s in _cm_smoothed(page)] == [False, False, False], (
+        "switching smoothing off restores the straight lines"
     )
 
 

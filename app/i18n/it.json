@@ -879,6 +879,7 @@
   "seg_range_7d": "7gg",
   "seg_range_30d": "30gg",
   "seg_range_all": "Tutti",
+  "seg_smooth": "Smussamento",
   "seg_note": "I valori di utilizzo del segmento sono stime fornite da FRITZ!Box e possono differire dal carico effettivo a livello di CMTS.",
   "seg_disabled": "L'utilizzo del segmento è disabilitato in Impostazioni.",
   "seg_unsupported_driver": "Questa visualizzazione è disponibile solo per i dispositivi via cavo FRITZ!Box.",

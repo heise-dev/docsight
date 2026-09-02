@@ -879,6 +879,7 @@
   "seg_range_7d": "7d",
   "seg_range_30d": "30d",
   "seg_range_all": "Todos",
+  "seg_smooth": "Suavização",
   "seg_note": "Os valores de utilização do segmento são estimativas fornecidas pelo FRITZ!Box e podem diferir da carga real em todo o CMTS.",
   "seg_disabled": "A utilização do segmento está desativada nas Configurações.",
   "seg_unsupported_driver": "Esta visualização está disponível apenas para dispositivos com cabo FRITZ!Box.",

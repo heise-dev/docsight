@@ -879,6 +879,7 @@
   "seg_range_7d": "7d",
   "seg_range_30d": "30d",
   "seg_range_all": "ar fad",
+  "seg_smooth": "Mínú",
   "seg_note": "Is meastacháin a sholáthraíonn an FRITZ!Box iad luachanna úsáide deighleog agus d'fhéadfadh siad a bheith éagsúil leis an ualach iarbhír ar fud an CMTS.",
   "seg_disabled": "Tá úsáid deighleog díchumasaithe sna Socruithe.",
   "seg_unsupported_driver": "Níl an dearcadh seo ar fáil ach amháin le haghaidh feistí cábla FRITZ!Box.",

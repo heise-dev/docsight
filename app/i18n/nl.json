@@ -879,6 +879,7 @@
   "seg_range_7d": "7d",
   "seg_range_30d": "30d",
   "seg_range_all": "Allemaal",
+  "seg_smooth": "Afvlakking",
   "seg_note": "Segmentgebruikswaarden zijn schattingen van de FRITZ!Box en kunnen afwijken van de werkelijke CMTS-brede belasting.",
   "seg_disabled": "Segmentgebruik is uitgeschakeld in Instellingen.",
   "seg_unsupported_driver": "Deze weergave is alleen beschikbaar voor FRITZ!Box-kabelapparaten.",

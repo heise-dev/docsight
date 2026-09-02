@@ -879,6 +879,7 @@
   "seg_range_7d": "7d",
   "seg_range_30d": "30 dní",
   "seg_range_all": "Všetky",
+  "seg_smooth": "Vyhladenie",
   "seg_note": "Hodnoty využitia segmentov sú odhady poskytované zariadením FRITZ!Box a môžu sa líšiť od skutočného zaťaženia celého CMTS.",
   "seg_disabled": "Používanie segmentov je zakázané v Nastaveniach.",
   "seg_unsupported_driver": "Toto zobrazenie je dostupné len pre káblové zariadenia FRITZ!Box.",

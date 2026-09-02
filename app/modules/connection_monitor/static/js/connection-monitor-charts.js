@@ -29,12 +29,13 @@ var CMCharts = (function() {
     var lastRenderArgs = null;
 
     function loadControls() {
-        var state = { loss: true, clip: false, targets: {} };
+        var state = { loss: true, clip: false, smooth: false, targets: {} };
         try {
             var stored = JSON.parse(localStorage.getItem(CONTROLS_STORAGE_KEY));
             if (stored) {
                 if (stored.loss === false) state.loss = false;
                 if (stored.clip === true) state.clip = true;
+                if (stored.smooth === true) state.smooth = true;
                 if (typeof stored.targets === 'object' && stored.targets !== null &&
                     !Array.isArray(stored.targets)) {
                     Object.keys(stored.targets).forEach(function(id) {
@@ -64,6 +65,7 @@ var CMCharts = (function() {
     function toggleControl(toggle, targetId) {
         if (toggle === 'loss') controls.loss = !controls.loss;
         else if (toggle === 'clip') controls.clip = !controls.clip;
+        else if (toggle === 'smooth') controls.smooth = !controls.smooth;
         else {
             var t = targetControls(targetId);
             t[toggle] = !t[toggle];
@@ -124,6 +126,7 @@ var CMCharts = (function() {
         var lBand = container.dataset.lBand || 'band';
         var lLoss = container.dataset.lLossMarkers || 'loss markers';
         var lClip = container.dataset.lClipSpikes || 'clip spikes';
+        var lSmooth = container.dataset.lSmooth || 'smooth';
         var lNoBand = container.dataset.lNoBand || 'No min/max values in this view';
 
         container.textContent = '';
@@ -149,6 +152,7 @@ var CMCharts = (function() {
         globals.className = 'cm-chart-control-globals';
         globals.appendChild(controlButton(lLoss, 'loss', null));
         globals.appendChild(controlButton(lClip, 'clip', null));
+        globals.appendChild(controlButton(lSmooth, 'smooth', null));
         container.appendChild(globals);
     }
 
@@ -160,6 +164,7 @@ var CMCharts = (function() {
             var on;
             if (toggle === 'loss') on = controls.loss;
             else if (toggle === 'clip') on = controls.clip;
+            else if (toggle === 'smooth') on = controls.smooth;
             else on = !btn.disabled && targetControls(btn.dataset.target)[toggle];
             btn.setAttribute('aria-pressed', on ? 'true' : 'false');
         }
@@ -478,14 +483,19 @@ var CMCharts = (function() {
                 color: color,
                 spanGaps: false,
                 dashed: hasAggregated ? true : undefined,
+                smooth: controls.smooth,
                 show: shown.line
             });
             if (shown.line) shownLines.push(data);
             // A switched-off band is not pushed at all, so it leaves the y ceiling,
             // the tooltip, the zoom y scan and the zoom modal in one move.
             if (hasAggregated && shown.band) {
-                datasets.push({ data: minData, color: 'transparent', label: label + ' min', show: false });
-                datasets.push({ data: maxData, color: 'transparent', label: label + ' max', show: false });
+                // The helpers carry the same smoothing so bandPlugin's envelope,
+                // which is built from their own path builders, follows the line
+                datasets.push({ data: minData, color: 'transparent', label: label + ' min',
+                    smooth: controls.smooth, show: false });
+                datasets.push({ data: maxData, color: 'transparent', label: label + ' max',
+                    smooth: controls.smooth, show: false });
                 // uPlot series[0] is x-axis, so data indices are offset by +1
                 var bandColor = color.replace(/[\d.]+\)$/, '0.12)');
                 bandPlugins.push(bandPlugin(datasets.length - 1, datasets.length, bandColor));
