@@ -6,16 +6,22 @@ name: Sync E2E case counts
 # are recomputed from a live collection after each merge instead; task branches
 # never touch them.
 #
-# Loop safety: this job pushes with the default GITHUB_TOKEN, and GitHub does
-# not trigger workflow runs for pushes made with that token -- the sync commit
-# starts no further run of this workflow, of test.yml, or of docker.yml.
-# docker.yml would not rebuild for it in any case: its `paths:` filter is
-# app/**, tools/**, requirements.txt, Dockerfile, .dockerignore, entrypoint.sh,
-# .github/workflows/docker.yml, and none of the five count files match.
+# Token: one of the five files is a workflow (full-e2e.yml), and the default
+# GITHUB_TOKEN may not create or update workflow files, so the push is made
+# with E2E_SYNC_TOKEN -- a fine-grained personal access token for this
+# repository with Contents: read/write and Workflows: read/write.
+#
+# Loop safety: a push made with a personal token DOES trigger workflows. The
+# sync commit re-runs this workflow once, which finds the counts in sync and
+# exits without committing; test.yml runs only on main; docker.yml does not
+# rebuild because its `paths:` filter (app/**, tools/**, requirements.txt,
+# Dockerfile, .dockerignore, entrypoint.sh, .github/workflows/docker.yml)
+# matches none of the five count files.
 
 on:
   push:
     branches: [deploy]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -34,6 +40,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: deploy
+          token: ${{ secrets.E2E_SYNC_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
