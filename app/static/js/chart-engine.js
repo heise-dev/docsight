@@ -744,7 +744,8 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
         cursor.drag = { x: true, y: false, uni: 10 };
     }
     /* Plugins */
-    var plugins = [tooltipPlugin(labels, tooltipLabelCallback)];
+    /* opts.tooltip:false suppresses the floating tooltip for callers that show the values elsewhere */
+    var plugins = opts && opts.tooltip === false ? [] : [tooltipPlugin(labels, tooltipLabelCallback)];
     if (zones) plugins.push(zonesPlugin(zones));
     if (opts && opts.plugins) { opts.plugins.forEach(function(p) { plugins.push(p); }); }
 

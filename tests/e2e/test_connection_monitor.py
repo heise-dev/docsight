@@ -1218,3 +1218,161 @@ def test_connection_monitor_outage_rows_mark_bucket_derived_windows(demo_page):
     marker = rows.nth(1).locator("td").nth(1).locator(".cm-approx")
     expect(marker).to_have_count(1)
     assert "minute-snapped" in marker.get_attribute("title").lower()
+
+
+TOUCH_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+)
+
+
+def _touch_context(browser):
+    """A phone-sized context with real touch input.
+
+    The function-scoped ``page``/``demo_page`` fixtures have no touch, so the touch
+    cases open their own context. ``is_mobile``/``has_touch`` already make
+    ``matchMedia('(pointer: coarse)')`` match, which is what switches the chart to
+    the readout - no ``Emulation.setEmulatedMedia`` needed.
+    """
+    return browser.new_context(
+        viewport={"width": 390, "height": 844},
+        device_scale_factor=3,
+        is_mobile=True,
+        has_touch=True,
+        user_agent=TOUCH_USER_AGENT,
+    )
+
+
+def _touch(cdp, kind, points):
+    """Dispatch one touch event; Playwright's sync API has no multi-touch gesture."""
+    cdp.send("Input.dispatchTouchEvent", {"type": kind, "touchPoints": points})
+
+
+def _prepare_touch_chart(page, live_server):
+    """Open the combined chart in a touch context and return the plot geometry."""
+    page.goto(live_server)
+    page.wait_for_load_state("networkidle")
+    _open_connection_monitor_chart(page)
+    page.wait_for_function(
+        "() => window.charts['cm-combined-chart'].data[0].length > 10"
+    )
+    # Freeze the poll: a rebuild mid-gesture drops the touch listeners with the old
+    # instance (they live on u.over), which would make the gesture look ignored
+    page.evaluate(
+        "() => { const last = setInterval(() => {}, 1e6);"
+        " for (let i = 1; i <= last; i++) clearInterval(i); }"
+    )
+    page.evaluate(
+        "() => window.charts['cm-combined-chart'].over.scrollIntoView({block: 'center'})"
+    )
+    return page.evaluate(
+        """() => {
+            const rect = window.charts['cm-combined-chart'].over.getBoundingClientRect();
+            return {left: rect.left, top: rect.top, width: rect.width, height: rect.height};
+        }"""
+    )
+
+
+def test_connection_monitor_touch_fills_the_readout_instead_of_a_tooltip(browser, live_server):
+    """On a touch device the values belong above the chart, not under the finger."""
+    context = _touch_context(browser)
+    page = context.new_page()
+    try:
+        geometry = _prepare_touch_chart(page, live_server)
+        cdp = context.new_cdp_session(page)
+        centre = {"x": geometry["left"] + geometry["width"] * 0.5,
+                  "y": geometry["top"] + geometry["height"] * 0.5}
+
+        _touch(cdp, "touchStart", [centre])
+        _touch(cdp, "touchEnd", [])
+
+        readout = page.locator("#cm-chart-readout")
+        expect(readout).to_be_visible()
+        expect(readout.locator(".cm-chart-readout-time")).to_have_text(re.compile(r"\d+:\d\d"))
+        targets = page.locator("#cm-chart-controls [data-toggle='line']")
+        expect(readout.locator(".cm-chart-readout-chip")).to_have_count(targets.count())
+        # The floating tooltip is what the readout replaces here
+        assert page.locator("#cm-combined-chart .uplot-tooltip").count() == 0
+
+        # A target switched off in the strip loses its chip too. Tapped, not clicked:
+        # a real mouse click parks the pointer on the button, and the compat
+        # mouseleave that follows the next tap would clear uPlot's cursor again.
+        expected = targets.count() - 1
+        page.evaluate("() => { window.charts['cm-combined-chart']._e2eStale = true; }")
+        page.locator("#cm-chart-controls [data-toggle='line'] >> nth=0").tap()
+        page.wait_for_function(
+            "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._e2eStale"
+        )
+        _touch(cdp, "touchStart", [centre])
+        _touch(cdp, "touchEnd", [])
+        expect(readout.locator(".cm-chart-readout-chip")).to_have_count(expected)
+    finally:
+        context.close()
+
+
+def test_connection_monitor_one_finger_drag_scrubs_the_cursor(browser, live_server):
+    """A finger dragged across the plot must walk the cursor, not scroll the page."""
+    context = _touch_context(browser)
+    page = context.new_page()
+    try:
+        geometry = _prepare_touch_chart(page, live_server)
+        cdp = context.new_cdp_session(page)
+        y = geometry["top"] + geometry["height"] * 0.5
+        start = geometry["left"] + geometry["width"] * 0.25
+        end = geometry["left"] + geometry["width"] * 0.75
+
+        _touch(cdp, "touchStart", [{"x": start, "y": y}])
+        midway = None
+        for step in range(1, 11):
+            _touch(cdp, "touchMove", [{"x": start + (end - start) * step / 10, "y": y}])
+            page.wait_for_timeout(40)
+            if step == 5:
+                midway = page.evaluate("() => window.charts['cm-combined-chart'].cursor.idx")
+        final = page.evaluate("() => window.charts['cm-combined-chart'].cursor.idx")
+        _touch(cdp, "touchEnd", [])
+
+        assert midway is not None, "the cursor must follow the finger while it moves"
+        assert final is not None
+        assert midway < final, "a left-to-right scrub must walk the cursor forward"
+        # touch-action:pan-y keeps the page's own scrolling out of a horizontal scrub
+        assert page.evaluate("() => window.scrollX") == 0
+    finally:
+        context.close()
+
+
+def test_connection_monitor_pinch_zooms_and_refetches_the_window(browser, live_server):
+    """Pinching out must commit the visible window like a drag-select does."""
+    context = _touch_context(browser)
+    page = context.new_page()
+    try:
+        state = {}
+        page.goto(live_server)
+        page.wait_for_load_state("networkidle")
+        _stub_connection_monitor_api(page, state=state)
+        geometry = _prepare_touch_chart(page, live_server)
+        cdp = context.new_cdp_session(page)
+        before = state["requests"][-1]
+
+        y = geometry["top"] + geometry["height"] * 0.5
+        left = geometry["left"] + geometry["width"] * 0.42
+        right = geometry["left"] + geometry["width"] * 0.58
+        page.evaluate("() => { window.charts['cm-combined-chart']._e2eStale = true; }")
+        _touch(cdp, "touchStart", [{"x": left, "y": y, "id": 0},
+                                   {"x": right, "y": y, "id": 1}])
+        for step in range(1, 11):
+            spread = geometry["width"] * 0.3 * step / 10
+            _touch(cdp, "touchMove", [{"x": left - spread, "y": y, "id": 0},
+                                      {"x": right + spread, "y": y, "id": 1}])
+            page.wait_for_timeout(40)
+        _touch(cdp, "touchEnd", [])
+        page.wait_for_function(
+            "() => window.charts['cm-combined-chart'] && !window.charts['cm-combined-chart']._e2eStale"
+        )
+
+        assert page.evaluate("() => window.cmHasZoomWindow()") is True
+        window = state["requests"][-1]
+        assert window["start"] > before["start"], "the pinched window must start later"
+        assert window["end"] < before["end"], "the pinched window must end earlier"
+        expect(page.locator("#cm-combined-chart button", has_text="Reset Zoom")).to_be_visible()
+    finally:
+        context.close()
