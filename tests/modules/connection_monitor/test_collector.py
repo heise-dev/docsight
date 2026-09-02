@@ -112,6 +112,40 @@ class TestCollect:
             result = collector.collect()
             mock_engine.probe.assert_not_called()
 
+    def _probed_after(self, mock_deps, interval_ms, elapsed_s):
+        """Is a target with that interval due `elapsed_s` after its last probe?"""
+        config_mgr, storage, web = mock_deps
+        with patch("app.modules.connection_monitor.collector.ProbeEngine"):
+            collector = ConnectionMonitorCollector(
+                config_mgr=config_mgr, storage=storage, web=web
+            )
+            collector._cm_storage = MagicMock()
+            collector._cm_storage.get_targets.return_value = [
+                {"id": 1, "host": "1.1.1.1", "enabled": True,
+                 "poll_interval_ms": interval_ms, "probe_method": "tcp",
+                 "tcp_port": 443},
+            ]
+            now = time.time()
+            collector._last_probe = {1: now}
+            with patch.object(collector, "_probe_targets", return_value=[]) as probe, \
+                 patch("app.modules.connection_monitor.collector.time.time",
+                       return_value=now + elapsed_s):
+                collector.collect()
+                return probe.call_count == 1
+
+    def test_due_on_a_slightly_short_1s_tick(self, mock_deps):
+        """The 1 s tick jitters below 1 s; a 1000 ms target must not wait an extra tick."""
+        assert self._probed_after(mock_deps, 1000, 0.995) is True
+
+    def test_not_due_well_before_the_1s_interval(self, mock_deps):
+        assert self._probed_after(mock_deps, 1000, 0.85) is False
+
+    def test_due_on_a_slightly_short_5s_interval(self, mock_deps):
+        assert self._probed_after(mock_deps, 5000, 4.95) is True
+
+    def test_not_due_well_before_the_5s_interval(self, mock_deps):
+        assert self._probed_after(mock_deps, 5000, 4.5) is False
+
 
 class TestCleanupCycle:
     def test_aggregation_called_before_cleanup(self, mock_deps):

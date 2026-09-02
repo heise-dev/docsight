@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 # Run retention cleanup every 15 minutes, not every collect cycle
 _CLEANUP_INTERVAL_S = 900
 
+# Tolerance for the due check, a fraction of the 1 s base tick: a target whose
+# interval equals the tick must be due on every tick despite the few ms of
+# jitter in when a cycle reads the clock.
+_DUE_SLACK_S = 0.1
+
 
 class ConnectionMonitorCollector(Collector):
     """Always-on latency collector with per-target timing."""
@@ -76,7 +81,7 @@ class ConnectionMonitorCollector(Collector):
             for t in targets:
                 interval_s = t["poll_interval_ms"] / 1000.0
                 last = self._last_probe.get(t["id"], 0)
-                if now - last >= interval_s:
+                if now - last >= interval_s - _DUE_SLACK_S:
                     due.append(t)
 
             if not due:
