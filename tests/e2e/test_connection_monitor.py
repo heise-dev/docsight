@@ -397,6 +397,8 @@ def test_connection_monitor_hidden_source_survives_data_refresh(demo_page):
     page.evaluate("switchView('connection-monitor')")
     page.wait_for_selector("#view-connection-monitor.active", state="visible")
     page.wait_for_selector("#cm-chart-controls [data-toggle='line']", state="visible")
+    # Showing the view refetches; let it land before stamping or reading the instance
+    page.wait_for_load_state("networkidle")
 
     line_toggles = page.locator("#cm-chart-controls [data-toggle='line']")
     assert line_toggles.count() >= 2, "combined chart should plot at least two monitored targets"
@@ -423,12 +425,20 @@ def test_connection_monitor_switch_refetches_without_waiting_for_the_poll(demo_p
     # The view builds its chart at load time while still hidden; its refresh timer
     # only ticks while the view is active, so this instance is the stale one.
     page.wait_for_function("() => !!charts['cm-combined-chart']")
-    page.evaluate("charts['cm-combined-chart']._e2eStale = true")
+    # Silence the 10s poll first, so only the switch itself can replace the instance
+    # (otherwise a tick landing inside the timeout would pass the unfixed code too).
+    page.evaluate(
+        """() => {
+            const probe = setInterval(() => {}, 1e6);
+            for (let i = 1; i <= probe; i++) clearInterval(i);
+            charts['cm-combined-chart']._e2eStale = true;
+        }"""
+    )
 
     page.evaluate("switchView('connection-monitor')")
     page.wait_for_selector("#view-connection-monitor.active", state="visible")
 
-    # Well below the 10s poll the switch would otherwise have to wait for
+    # Bounded by the fetch alone now; without the fix nothing replaces the instance
     page.wait_for_function(
         "() => charts['cm-combined-chart'] && !charts['cm-combined-chart']._e2eStale",
         timeout=5000,
@@ -441,6 +451,8 @@ def test_connection_monitor_hidden_source_stays_hidden_in_zoom_modal(demo_page):
     page.evaluate("switchView('connection-monitor')")
     page.wait_for_selector("#view-connection-monitor.active", state="visible")
     page.wait_for_selector("#cm-chart-controls [data-toggle='line']", state="visible")
+    # Showing the view refetches; let it land before stamping or reading the instance
+    page.wait_for_load_state("networkidle")
 
     line_toggles = page.locator("#cm-chart-controls [data-toggle='line']")
     assert line_toggles.count() >= 2, "combined chart should plot at least two monitored targets"

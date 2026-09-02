@@ -325,7 +325,7 @@ var CORRELATION_CM_AVAILABLE = dashboardBootstrap.connectionMonitorAvailable;
         } else if (view === 'evidence') {
             if (typeof initEvidence === 'function') initEvidence();
         } else if (view === 'connection-monitor') {
-            if (typeof window.cmViewShown === 'function') window.cmViewShown();
+            if (previousView !== view && typeof window.cmViewShown === 'function') window.cmViewShown();
         } else if (view.indexOf('mod-') === 0) {
             /* Generic module init: mod-docsight-comparison → initComparison */
             var parts = view.replace('mod-docsight-', '').split('-');
