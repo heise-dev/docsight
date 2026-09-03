@@ -331,7 +331,9 @@ class ConnectionMonitorStorage:
                 if r["latency_count"]:
                     # Buckets never interleave in time, so the first and last
                     # timestamp of this one bound exactly its own samples and
-                    # the read stays on the (target_id, timestamp) index.
+                    # the read stays on the (target_id, timestamp) index. The
+                    # nearest-rank sample is counted from the slowest end, so
+                    # the bounded sorter keeps the bucket's tail, not its bulk.
                     p95_row = conn.execute(
                         """
                         SELECT latency_ms
@@ -339,14 +341,15 @@ class ConnectionMonitorStorage:
                         WHERE target_id = :target_id
                           AND timestamp >= :first_ts AND timestamp <= :last_ts
                           AND latency_ms IS NOT NULL
-                        ORDER BY latency_ms
+                        ORDER BY latency_ms DESC
                         LIMIT 1 OFFSET :offset
                         """,
                         {
                             "target_id": target_id,
                             "first_ts": r["first_ts"],
                             "last_ts": r["last_ts"],
-                            "offset": int(r["latency_count"] * 0.95),
+                            "offset": r["latency_count"] - 1
+                            - int(r["latency_count"] * 0.95),
                         },
                     ).fetchone()
                     p95_latency = p95_row["latency_ms"] if p95_row else None
