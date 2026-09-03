@@ -145,7 +145,7 @@
     function parseSettingsBootstrapText(text) {
         var value = parseRecord(text, [
             'translations', 'modules', 'serverOffsetMin', 'serverTimezone', 'language',
-            'currentTimezone', 'notificationCooldowns', 'driverHints',
+            'currentTimezone', 'notificationCooldowns', 'badgeMutedTypes', 'driverHints',
             'moduleSecretFields', 'savedModuleSecretFields'
         ]);
         if (!validTranslationRecord(value.translations) || !Array.isArray(value.modules) || !value.modules.every(validModule)) failBootstrap();
@@ -153,6 +153,7 @@
         if (typeof value.serverTimezone !== 'string' || value.serverTimezone.length > 128) failBootstrap();
         if (!validLanguage(value.language) || (value.currentTimezone !== null && typeof value.currentTimezone !== 'string')) failBootstrap();
         if (typeof value.notificationCooldowns !== 'string' || value.notificationCooldowns.length > 100000) failBootstrap();
+        if (typeof value.badgeMutedTypes !== 'string' || value.badgeMutedTypes.length > 100000) failBootstrap();
         validateDriverHints(value.driverHints);
         if (!validStringList(value.moduleSecretFields) || !validStringList(value.savedModuleSecretFields)) failBootstrap();
         if (!value.savedModuleSecretFields.every(function (key) { return value.moduleSecretFields.indexOf(key) !== -1; })) failBootstrap();
@@ -164,6 +165,13 @@
         } catch (error) {
             cooldowns = {};
         }
+        var mutedTypes = [];
+        try {
+            var mutedCandidate = JSON.parse(value.badgeMutedTypes);
+            if (validStringList(mutedCandidate) && isSafeJson(mutedCandidate)) mutedTypes = mutedCandidate;
+        } catch (error) {
+            mutedTypes = [];
+        }
         return {
             translations: value.translations,
             modules: value.modules,
@@ -172,6 +180,7 @@
             language: value.language,
             currentTimezone: value.currentTimezone || '',
             notificationCooldowns: cooldowns,
+            badgeMutedTypes: mutedTypes,
             driverHints: value.driverHints,
             moduleSecretFields: value.moduleSecretFields,
             savedModuleSecretFields: value.savedModuleSecretFields

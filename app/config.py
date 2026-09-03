@@ -101,6 +101,7 @@ DEFAULTS = {
     "notify_min_severity": "warning",
     "notify_cooldown": 3600,
     "notify_cooldowns": "{}",
+    "events_badge_muted_types": "[]",  # JSON list of event types excluded from the badge count
     "timezone": "",
     "disabled_modules": "docsight.smokeping",  # comma-separated list of module IDs to disable
     "active_theme": "",  # Module ID of active theme (empty = first available)
@@ -173,6 +174,7 @@ ENV_MAP = {
     "notify_min_severity": "NOTIFY_MIN_SEVERITY",
     "notify_cooldown": "NOTIFY_COOLDOWN",
     "notify_cooldowns": "NOTIFY_COOLDOWNS",
+    "events_badge_muted_types": "EVENTS_BADGE_MUTED_TYPES",
     "bnetz_watch_enabled": "BNETZ_WATCH_ENABLED",
     "bnetz_watch_dir": "BNETZ_WATCH_DIR",
     "weather_enabled": "WEATHER_ENABLED",

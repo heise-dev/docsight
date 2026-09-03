@@ -236,6 +236,56 @@
         </div>
     </div>
 
+    <!-- Event Badge Card (collapsible) -->
+    <div class="settings-card glass collapsible-card collapsed" id="event-badge-types">
+        <div class="card-header card-collapse-toggle" onclick="toggleCardCollapse(this)">
+            <div class="card-title-group">
+                <div class="card-icon amber">
+                    <i data-lucide="bell-off"></i>
+                </div>
+                <div>
+                    <div class="card-title">{{ t.events_badge_title }}</div>
+                    <div class="card-subtitle">{{ t.events_badge_desc }}</div>
+                </div>
+            </div>
+            <i data-lucide="chevron-down" class="card-collapse-icon"></i>
+        </div>
+        <div class="card-collapse-body">
+        <table class="cooldown-table">
+            <thead>
+                <tr>
+                    <th>{{ t.events_badge_col_count }}</th>
+                    <th>{{ t.notify_col_event }}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for event_key, event_label in [
+                    ('health_change', t.event_type_health_change),
+                    ('power_change', t.event_type_power_change),
+                    ('snr_change', t.event_type_snr_change),
+                    ('channel_change', t.event_type_channel_change),
+                    ('modulation_change', t.event_type_modulation_change),
+                    ('error_spike', t.event_type_error_spike),
+                    ('modem_restart_detected', t.event_type_modem_restart_detected),
+                    ('device_reboot', t.event_type_device_reboot),
+                    ('device_sw_update', t.event_type_device_sw_update),
+                    ('device_ip_change', t.event_type_device_ip_change),
+                    ('smart_capture_triggered', t.event_type_smart_capture_triggered),
+                    ('cm_packet_loss_warning', t.event_type_cm_packet_loss_warning),
+                    ('cm_target_unreachable', t.event_type_cm_target_unreachable),
+                    ('cm_target_recovered', t.event_type_cm_target_recovered),
+                ] %}
+                <tr class="badge-event-row" data-event="{{ event_key }}">
+                    <td><label class="toggle"><input type="checkbox" class="badge-count-toggle" data-event="{{ event_key }}" checked><span class="toggle-slider"></span></label></td>
+                    <td><span class="event-name">{{ event_label }}</span></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <span class="form-hint" style="display:block;margin-top:var(--space-md);">{{ t.events_badge_hint }}</span>
+        </div>
+    </div>
+
     <!-- Test Card -->
     <div class="settings-card glass">
         <div class="card-header">

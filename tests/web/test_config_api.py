@@ -3,6 +3,8 @@
 import json
 import logging
 
+from app.runtime import get_runtime
+
 
 class TestConfigAPI:
     def test_save_config(self, client):
@@ -40,6 +42,16 @@ class TestConfigAPI:
             content_type="application/json",
         )
         assert json.loads(resp.data)["success"] is True
+
+    def test_save_badge_muted_types_round_trip(self, client, app):
+        muted = json.dumps(["cm_packet_loss_warning", "cm_target_recovered"])
+        resp = client.post(
+            "/api/config",
+            data=json.dumps({"events_badge_muted_types": muted}),
+            content_type="application/json",
+        )
+        assert json.loads(resp.data)["success"] is True
+        assert get_runtime(app).config_manager.get("events_badge_muted_types") == muted
 
     def test_save_no_data(self, client):
         resp = client.post("/api/config", content_type="application/json")

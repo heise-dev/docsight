@@ -56,12 +56,14 @@ test('settings bootstrap validates modules, cooldown fallback, secrets, and time
         language: 'de',
         currentTimezone: null,
         notificationCooldowns: '{"warning":15}',
+        badgeMutedTypes: '["cm_packet_loss_warning"]',
         driverHints: {},
         moduleSecretFields: ['example_token'],
         savedModuleSecretFields: []
     };
     const parsed = contracts.parseSettingsBootstrapText(JSON.stringify(base));
     assert.deepEqual(parsed.notificationCooldowns, {warning: 15});
+    assert.deepEqual(parsed.badgeMutedTypes, ['cm_packet_loss_warning']);
     assert.equal(parsed.currentTimezone, '');
 
     const compatibleExtension = contracts.parseSettingsBootstrapText(JSON.stringify({
@@ -76,6 +78,10 @@ test('settings bootstrap validates modules, cooldown fallback, secrets, and time
         ...base,
         notificationCooldowns: 'malformed'
     })).notificationCooldowns, {});
+    assert.deepEqual(contracts.parseSettingsBootstrapText(JSON.stringify({
+        ...base,
+        badgeMutedTypes: '{"not":"a list"}'
+    })).badgeMutedTypes, []);
     assert.throws(() => contracts.parseSettingsBootstrapText(JSON.stringify({
         ...base,
         modules: [{id: '../../escape', labelKey: 'x', name: 'Bad'}]
