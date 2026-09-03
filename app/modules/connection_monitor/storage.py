@@ -391,13 +391,16 @@ class ConnectionMonitorStorage:
             stats = dict(row) if row else {}
             latency_count = stats.get("latency_count") or 0
             if latency_count > 0:
-                p95_offset = max(0, math.ceil(latency_count * 0.95) - 1)
+                # Same nearest-rank sample, counted from the slowest end: the
+                # bounded sorter then only has to keep the top 5% of the window
+                # instead of ordering all of it.
+                p95_offset = latency_count - self._p95_rank(latency_count)
                 p95_row = conn.execute(
                     f"""
                     SELECT latency_ms
                     FROM connection_samples
                     WHERE {where} AND timeout = 0 AND latency_ms IS NOT NULL
-                    ORDER BY latency_ms
+                    ORDER BY latency_ms DESC
                     LIMIT 1 OFFSET ?
                     """,
                     [*params, p95_offset],
@@ -424,8 +427,9 @@ class ConnectionMonitorStorage:
         timeout_total = 0.0
         min_latency = None
         max_latency = None
-        # Bucket p95 stand-ins as (value, weight); raw latencies stay a plain
-        # sorted float list so a 30d window never materialises 100k+ tuples.
+        # Bucket p95 stand-ins as (value, weight); the raw side stays in
+        # SQLite until the weights are known, then only its slowest values are
+        # read - a 30d window never materialises 100k+ latencies.
         bucket_p95: list[tuple[float, int]] = []
 
         where, params = self._build_sample_where(target_id, start=start, end=end)
@@ -444,19 +448,6 @@ class ConnectionMonitorStorage:
                 """,
                 params,
             ).fetchone()
-            # The ordered list only feeds the quantile walk; the totals above
-            # come straight from SQLite.
-            latencies = [
-                r[0] for r in conn.execute(
-                    f"""
-                    SELECT latency_ms
-                    FROM connection_samples
-                    WHERE {where} AND timeout = 0 AND latency_ms IS NOT NULL
-                    ORDER BY latency_ms
-                    """,
-                    params,
-                )
-            ]
         if row["sample_count"]:
             tiers_used.append("raw")
             sample_count += row["sample_count"]
@@ -498,7 +489,16 @@ class ConnectionMonitorStorage:
                 if b["p95_latency_ms"] is not None:
                     bucket_p95.append((b["p95_latency_ms"], latency_est))
 
-        p95_latency = self._weighted_p95(latencies, bucket_p95)
+        # The quantile walk starts at the slowest value and stops at the rank,
+        # so the raw side only has to supply the values above it: at most the
+        # top 5% of the window plus one.
+        raw_latencies = row["latency_count"] or 0
+        total_weight = raw_latencies + sum(w for _, w in bucket_p95)
+        tail = self._slowest_raw_latencies(
+            where, params,
+            min(raw_latencies, total_weight - self._p95_rank(total_weight) + 1),
+        )
+        p95_latency = self._weighted_p95(tail, raw_latencies, bucket_p95)
 
         return {
             "sample_count": sample_count,
@@ -514,36 +514,71 @@ class ConnectionMonitorStorage:
         }
 
     @staticmethod
+    def _p95_rank(total_weight: int) -> int:
+        """1-based nearest-rank position of the p95 in a weighted window."""
+        return max(1, math.ceil(total_weight * 0.95))
+
+    def _slowest_raw_latencies(
+        self,
+        where: str,
+        params: list,
+        limit: int,
+    ) -> list[float]:
+        """The slowest raw latencies of a window, slowest first.
+
+        A bounded ORDER BY costs SQLite a top-N sorter instead of ordering
+        every latency in the window.
+        """
+        if limit <= 0:
+            return []
+        with self._read() as conn:
+            return [
+                r[0] for r in conn.execute(
+                    f"""
+                    SELECT latency_ms
+                    FROM connection_samples
+                    WHERE {where} AND timeout = 0 AND latency_ms IS NOT NULL
+                    ORDER BY latency_ms DESC
+                    LIMIT ?
+                    """,
+                    [*params, limit],
+                )
+            ]
+
+    @classmethod
     def _weighted_p95(
-        latencies: list[float],
+        cls,
+        raw_tail: list[float],
+        raw_count: int,
         bucket_p95: list[tuple[float, int]],
     ) -> float | None:
         """Weighted nearest-rank p95 over raw values plus bucket stand-ins.
 
-        Both inputs are walked two-pointer style, so no combined list is built
-        and the raw side reuses the ordering SQL already produced.
+        Both inputs are walked two-pointer style from the slowest value down,
+        counting the remaining weight towards the rank. Walking down rather
+        than up keeps the raw side to ``raw_tail``, the slowest values of the
+        window; ``raw_count`` is how many raw latencies it stands for.
         """
-        raw_len = len(latencies)
+        raw_len = len(raw_tail)
         bucket_len = len(bucket_p95)
-        total_weight = raw_len + sum(w for _, w in bucket_p95)
+        total_weight = raw_count + sum(w for _, w in bucket_p95)
         if total_weight <= 0:
             return None
-        bucket_p95.sort(key=lambda pair: pair[0])
-        rank = max(1, math.ceil(total_weight * 0.95))
-        cumulative = 0
+        bucket_p95.sort(key=lambda pair: pair[0], reverse=True)
+        rank = cls._p95_rank(total_weight)
+        remaining = total_weight
         value = None
         i = j = 0
         while i < raw_len or j < bucket_len:
-            if j >= bucket_len or (i < raw_len and latencies[i] <= bucket_p95[j][0]):
-                value = latencies[i]
-                cumulative += 1
+            if j >= bucket_len or (i < raw_len and raw_tail[i] >= bucket_p95[j][0]):
+                value, weight = raw_tail[i], 1
                 i += 1
             else:
                 value, weight = bucket_p95[j]
-                cumulative += weight
                 j += 1
-            if cumulative >= rank:
+            if remaining - weight < rank:
                 break
+            remaining -= weight
         return value
 
     # --- Summary ---

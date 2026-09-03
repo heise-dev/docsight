@@ -40,6 +40,14 @@ def _local_midday(timestamp):
     ).timestamp()
 
 
+def _reference_weighted_p95(latencies, bucket_p95):
+    """Nearest-rank p95 over the fully expanded weighted sample."""
+    values = sorted(latencies + [v for v, weight in bucket_p95 for _ in range(weight)])
+    if not values:
+        return None
+    return values[max(1, math.ceil(len(values) * 0.95)) - 1]
+
+
 class TestTargetCRUD:
     def test_create_target(self, storage):
         tid = storage.create_target("Cloudflare", "1.1.1.1")
@@ -579,6 +587,34 @@ class TestTieredRangeStats:
         # ceil(0.95 * 1010) = 960 <= 1000, so the wide bucket carries the p95;
         # an unweighted p95 (or max) of the two bucket p95s would say 500.0.
         assert stats["p95_latency_ms"] == 10.0
+
+    def test_range_stats_p95_matches_the_expanded_reference(self, storage):
+        """Reading only the slowest raw latencies must not move the p95."""
+        rng = random.Random(2026)
+        now = time.time()
+        base = ((now - 10 * 86400) // 60) * 60
+        for case in range(20):
+            tid = storage.create_target(f"Test {case}", "1.1.1.1")
+            latencies = [round(rng.uniform(5, 400), 3) for _ in range(rng.randint(0, 120))]
+            storage.save_samples([
+                {"target_id": tid, "timestamp": now - 60 - i, "latency_ms": latency,
+                 "timeout": False, "probe_method": "tcp"}
+                for i, latency in enumerate(latencies)
+            ])
+            buckets = []
+            weighted = []
+            for i in range(rng.randint(0, 8)):
+                count = rng.randint(1, 50)
+                p95 = round(rng.uniform(5, 400), 3)
+                buckets.append({
+                    "bucket_start": base + i * 60, "avg_latency_ms": p95,
+                    "min_latency_ms": p95, "max_latency_ms": p95, "p95_latency_ms": p95,
+                    "packet_loss_pct": 0.0, "sample_count": count,
+                })
+                weighted.append((p95, count))
+            _save_buckets(storage, tid, 60, buckets)
+            stats = storage.get_range_stats(tid, start=base, end=now)
+            assert stats["p95_latency_ms"] == _reference_weighted_p95(latencies, weighted)
 
     def test_range_stats_from_5min_and_1hr_buckets(self, storage):
         """An unbounded window must reach the coarser tiers too."""
