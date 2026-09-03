@@ -217,22 +217,12 @@ class SnapshotMethods:
         """Get all snapshots between two ISO timestamps (inclusive)."""
         anchor_start = _unwrap_anchor_start(end_ts)
         with self._read() as conn:
-            anchor_rows = conn.execute(
-                "SELECT timestamp, summary_json FROM snapshots "
-                "WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp",
-                (anchor_start, start_ts),
-            ).fetchall()
+            seed_rows = self._unwrap_seed_summaries(conn, anchor_start, start_ts)
             visible_rows = conn.execute(
                 "SELECT timestamp, summary_json, ds_channels_json, us_channels_json, analysis_meta_json "
                 "FROM snapshots WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
                 (start_ts, end_ts),
             ).fetchall()
-        anchor_entries = []
-        for row in anchor_rows:
-            anchor_entries.append({
-                "timestamp": row[0],
-                "summary": _normalize_summary_errors(json.loads(row[1])),
-            })
         visible_entries = []
         for row in visible_rows:
             visible_entries.append({
@@ -243,7 +233,7 @@ class SnapshotMethods:
                 "analysis_meta": _load_analysis_meta(row[4]),
             })
         unwrap_uint32_counter_series(
-            (entry["summary"] for entry in [*anchor_entries, *visible_entries]),
+            [*seed_rows, *(entry["summary"] for entry in visible_entries)],
             _SUMMARY_ERROR_KEYS,
             allow_aggregate_wrap=True,
         )
@@ -257,29 +247,48 @@ class SnapshotMethods:
         start_utc, end_utc = local_date_to_utc_range(date, self.tz_name)
         anchor_start = _unwrap_anchor_start(end_utc)
         with self._read() as conn:
+            seed_rows = self._unwrap_seed_summaries(conn, anchor_start, start_utc)
             rows = conn.execute(
                 "SELECT timestamp, summary_json FROM snapshots "
                 "WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
-                (anchor_start, end_utc),
+                (start_utc, end_utc),
             ).fetchall()
-        results = []
-        for row in rows:
-            entry = {"timestamp": row[0]}
-            entry.update(_normalize_summary_errors(json.loads(row[1])))
-            results.append(entry)
-        unwrap_uint32_counter_series(
-            results,
-            _SUMMARY_ERROR_KEYS,
-            allow_aggregate_wrap=True,
+        return self._summary_rows_to_entries(
+            rows,
+            seed_rows,
+            start_ts=start_utc,
+            end_ts=end_utc,
         )
-        return [
-            entry for entry in results
-            if _timestamp_in_range(entry["timestamp"], start_utc, end_utc)
-        ]
+
+    def _unwrap_seed_summaries(self, conn, anchor_start: str, cutoff: str):
+        """Return counter-only rows before a cutoff to seed the unwrap offset.
+
+        Only the aggregate error counters carry the unwrap offset forward, so the
+        anchor window is read with json_extract instead of decoding every stored
+        summary in Python: it can hold tens of thousands of snapshots that the
+        caller never returns. Every row still has to be visited, because the
+        offset accumulates over each wrap in the chain.
+        """
+        rows = conn.execute(
+            "SELECT json_extract(summary_json, '$.ds_correctable_errors'), "
+            "json_extract(summary_json, '$.ds_uncorrectable_errors'), "
+            "json_type(summary_json, '$.errors_supported') FROM snapshots "
+            "WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp",
+            (anchor_start, cutoff),
+        ).fetchall()
+        seed_rows = []
+        for row in rows:
+            unsupported = row[2] == "false"
+            seed_rows.append({
+                "ds_correctable_errors": None if unsupported else row[0],
+                "ds_uncorrectable_errors": None if unsupported else row[1],
+            })
+        return seed_rows
 
     def _summary_rows_to_entries(
         self,
         rows,
+        seed_rows=(),
         start_ts: str | None = None,
         end_ts: str | None = None,
     ):
@@ -289,7 +298,7 @@ class SnapshotMethods:
             entry.update(_normalize_summary_errors(json.loads(row[1])))
             results.append(entry)
         unwrap_uint32_counter_series(
-            results,
+            [*seed_rows, *results],
             _SUMMARY_ERROR_KEYS,
             allow_aggregate_wrap=True,
         )
@@ -302,13 +311,17 @@ class SnapshotMethods:
         """Get summary snapshots from the last N hours."""
         cutoff = utc_cutoff(hours=hours)
         anchor_start = utc_cutoff(hours=_UNWRAP_ANCHOR_DAYS * 24)
+        # Canonical UTC strings sort lexicographically, so max() keeps a request
+        # longer than the anchor window from reading past its bounded start.
+        visible_start = max(cutoff, anchor_start)
         with self._read() as conn:
+            seed_rows = self._unwrap_seed_summaries(conn, anchor_start, visible_start)
             rows = conn.execute(
                 "SELECT timestamp, summary_json FROM snapshots "
                 "WHERE timestamp >= ? ORDER BY timestamp",
-                (anchor_start,),
+                (visible_start,),
             ).fetchall()
-        return self._summary_rows_to_entries(rows, start_ts=cutoff)
+        return self._summary_rows_to_entries(rows, seed_rows, start_ts=cutoff)
 
     def get_summary_range(self, start_date, end_date):
         """Get all snapshots (summary only) between two dates. Like get_intraday_data but multi-day.
@@ -318,15 +331,18 @@ class SnapshotMethods:
         range_start, _ = local_date_to_utc_range(start_date, self.tz_name)
         _, range_end = local_date_to_utc_range(end_date, self.tz_name)
         anchor_start = _unwrap_anchor_start(range_end)
+        visible_start = max(range_start, anchor_start)
         with self._read() as conn:
+            seed_rows = self._unwrap_seed_summaries(conn, anchor_start, visible_start)
             rows = conn.execute(
                 "SELECT timestamp, summary_json FROM snapshots "
                 "WHERE timestamp >= ? AND timestamp <= ? "
                 "ORDER BY timestamp",
-                (anchor_start, range_end),
+                (visible_start, range_end),
             ).fetchall()
         return self._summary_rows_to_entries(
             rows,
+            seed_rows,
             start_ts=range_start,
             end_ts=range_end,
         )

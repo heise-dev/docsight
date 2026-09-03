@@ -387,6 +387,66 @@ class TestSnapshotStorage:
         assert range_data[0]["ds_channels"] == [{"channel_id": 1}]
         assert range_data[0]["us_channels"] == [{"channel_id": 2}]
 
+    def test_summary_readers_seed_unwrap_from_every_anchor_row(self, storage):
+        """Anchor seeding must carry every pre-window wrap, not just the last row."""
+        anchor_rows = [
+            ("2026-03-15T00:00:00Z", True, 4_000_000_000),
+            ("2026-04-10T00:00:00Z", True, 100_000_000),
+            ("2026-05-01T00:00:00Z", True, 4_200_000_000),
+            ("2026-05-20T00:00:00Z", False, 0),
+            ("2026-05-31T00:00:00Z", True, 4_250_000_000),
+            ("2026-06-01T00:00:00Z", True, 50_000_000),
+        ]
+        with sqlite3.connect(storage.db_path) as conn:
+            for timestamp, supported, correctable_errors in anchor_rows:
+                conn.execute(
+                    "INSERT INTO snapshots "
+                    "(timestamp, summary_json, ds_channels_json, us_channels_json) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        timestamp,
+                        json.dumps({
+                            "errors_supported": supported,
+                            "ds_correctable_errors": correctable_errors,
+                            "ds_uncorrectable_errors": 0,
+                        }),
+                        "not-json-anchor-ds",
+                        "not-json-anchor-us",
+                    ),
+                )
+            for timestamp, correctable_errors in [
+                ("2026-06-02T00:00:00Z", 60_000_000),
+                ("2026-06-02T12:00:00Z", 70_000_000),
+            ]:
+                conn.execute(
+                    "INSERT INTO snapshots "
+                    "(timestamp, summary_json, ds_channels_json, us_channels_json) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        timestamp,
+                        json.dumps({
+                            "errors_supported": True,
+                            "ds_correctable_errors": correctable_errors,
+                            "ds_uncorrectable_errors": 0,
+                        }),
+                        "[]",
+                        "[]",
+                    ),
+                )
+
+        intraday = storage.get_intraday_data("2026-06-02")
+        summary_range = storage.get_summary_range("2026-06-02", "2026-06-02")
+        range_data = storage.get_range_data(
+            "2026-06-02T00:00:00Z",
+            "2026-06-02T12:00:00Z",
+        )
+
+        expected = [8_649_934_592, 8_659_934_592]
+        assert [row["ds_correctable_errors"] for row in intraday] == expected
+        assert [row["ds_uncorrectable_errors"] for row in intraday] == [0, 0]
+        assert [row["ds_correctable_errors"] for row in summary_range] == expected
+        assert [row["summary"]["ds_correctable_errors"] for row in range_data] == expected
+
     def test_range_data_includes_snapshots_exactly_on_both_bounds(self, storage):
         """Exact report windows retain snapshots at both inclusive boundaries."""
         with sqlite3.connect(storage.db_path) as conn:

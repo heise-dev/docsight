@@ -361,3 +361,34 @@ class TestHealthEndpoint:
         page.goto(f"{live_server}/health")
         content = page.text_content("body")
         assert '"status": "ok"' in content or '"status":"ok"' in content
+
+
+class TestDashboardTrendRequests:
+    """The hero chart and the sparklines render one shared /api/trends payload."""
+
+    def test_hero_chart_and_sparklines_issue_one_trends_request_per_render(self, page, live_server):
+        trend_requests = []
+
+        def record(request):
+            if "/api/trends" in request.url:
+                trend_requests.append(request.url)
+
+        page.on("request", record)
+
+        page.goto(live_server)
+        page.wait_for_load_state("networkidle")
+        page.wait_for_function(
+            "() => performance.getEntriesByType('resource')"
+            ".some((e) => e.name.includes('/api/trends'))",
+            timeout=5000,
+        )
+        assert len(trend_requests) == 1
+
+        # The 60s auto-refresh re-inits both renderers back to back (dashboard.js).
+        page.evaluate("window.refreshHeroChart(); window.refreshSparklines();")
+        page.wait_for_function(
+            "() => performance.getEntriesByType('resource')"
+            ".filter((e) => e.name.includes('/api/trends')).length >= 2",
+            timeout=5000,
+        )
+        assert len(trend_requests) == 2
