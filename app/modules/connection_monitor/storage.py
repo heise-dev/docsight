@@ -203,6 +203,13 @@ class ConnectionMonitorStorage:
         part newer than _TIER_RAW_MAX_AGE, the 60s/300s/3600s buckets cover
         progressively older parts. Upper bounds are made exclusive so a
         sample can never be counted in two tiers.
+
+        A sub-window narrower than one bucket of its tier is dropped: the only
+        bucket that can start in it spans past its end, into time the newer
+        tier already covers. The browser sends "now - 7d .. now" a moment
+        before the server reads its own clock, so an exact 7d range always
+        leaves such a sliver - and reading it would pull the whole request onto
+        the blended path for data the raw tier holds exactly.
         """
         range_start = start if start is not None else float("-inf")
         range_end = end if end is not None else now
@@ -215,12 +222,12 @@ class ConnectionMonitorStorage:
             ("1hr", 3600, None, self._TIER_300S_MAX_AGE),
         ):
             tier_start = range_start if max_age is None else max(range_start, now - max_age)
-            tier_end = _exclusive_upper_bound(min(range_end, now - newer_age))
-            if tier_start <= tier_end:
+            tier_end = min(range_end, now - newer_age)
+            if tier_end - tier_start >= bucket_seconds:
                 windows.append((
                     name, bucket_seconds,
                     None if tier_start == float("-inf") else tier_start,
-                    tier_end,
+                    _exclusive_upper_bound(tier_end),
                 ))
         return windows
 

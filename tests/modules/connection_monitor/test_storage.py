@@ -494,6 +494,27 @@ class TestSummary:
 class TestTieredRangeStats:
     """Windows reaching past the raw retention must read the bucket tiers."""
 
+    def test_a_seven_day_window_ending_now_opens_no_tier(self, storage):
+        """The range the UI sends must stay on the exact raw path.
+
+        The browser computes "now - 7d .. now" a moment before the server reads
+        its own clock, so the old end of the window reaches a hair past the raw
+        boundary. That sliver is narrower than a 60s bucket and holds nothing
+        the raw tier does not already cover.
+        """
+        client_now = 1_700_000_000.0
+        assert storage._aggregated_sub_windows(
+            client_now - 7 * 86400, client_now, client_now + 0.25
+        ) == []
+
+    def test_a_tier_slice_wider_than_one_bucket_is_kept(self, storage):
+        client_now = 1_700_000_000.0
+        windows = storage._aggregated_sub_windows(
+            client_now - 7 * 86400 - 600, client_now, client_now + 0.25
+        )
+        assert [w[0] for w in windows] == ["1min"]
+        assert windows[0][2] == client_now - 7 * 86400 - 600
+
     def test_range_stats_from_60s_buckets_only(self, storage):
         tid = storage.create_target("Test", "1.1.1.1")
         now = time.time()
