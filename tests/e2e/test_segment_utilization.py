@@ -24,15 +24,32 @@ def wait_for_content(page, timeout=5000):
     page.wait_for_selector("#fritz-cable-content:not([style*='display: none'])", timeout=timeout)
 
 
-def segment_smoothed(page, chart_id):
-    """Whether each series of a segment chart uses uPlot's spline path builder."""
+def segment_plotted(page, chart_id):
+    """The arrays a segment chart plots: total first, then the own share."""
     return page.evaluate(
-        """(id) => {
-            const spline = uPlot.paths.spline().toString();
-            return window.charts[id].series.slice(1).map(
-                (s) => !!s.paths && s.paths.toString() === spline);
-        }""",
+        "(id) => window.charts[id].data.slice(1).map((a) => Array.from(a))",
         chart_id,
+    )
+
+
+def stub_jittery_samples(page, server):
+    """Serve the real payload with a 4-point sawtooth and one 90 % spike planted.
+
+    The seeded FRITZ!Box data is too smooth to tell a jitter filter from a no-op,
+    so the values are replaced while the timestamps stay whatever the API serves.
+    """
+    payload = page.request.get(f"{server}/api/fritzbox/segment-utilization?range=all").json()
+    samples = payload["samples"]
+    assert len(samples) >= 40, "the seeded range must be long enough to plant a baseline in"
+    for i, sample in enumerate(samples):
+        sample["ds_total"] = 90.0 if i == 10 else 40.0 + (i % 5)
+        sample["us_total"] = 40.0 + (i % 5)
+        sample["ds_own"] = 20.0 + (i % 5)
+        sample["us_own"] = 20.0 + (i % 5)
+    # A regex, so the sibling /events endpoint keeps its real response
+    page.route(
+        re.compile(r"/api/fritzbox/segment-utilization\?"),
+        lambda route: route.fulfill(json=payload),
     )
 
 
@@ -265,10 +282,11 @@ class TestSegmentRangeTabs:
 
 
 class TestSegmentSmoothing:
-    """Opt-in smoothed chart lines, persisted per browser."""
+    """Opt-in jitter filtering on the plotted lines, persisted per browser."""
 
-    def test_smooth_toggle_splines_both_charts_and_persists(self, fritzbox_page):
-        """Smoothing is off by default, covers both series, and survives a reload."""
+    def test_smooth_toggle_filters_both_charts_and_persists(self, fritzbox_page, fritzbox_server):
+        """Smoothing is off by default, flattens both series, and survives a reload."""
+        stub_jittery_samples(fritzbox_page, fritzbox_server)
         navigate_to_segment(fritzbox_page)
         wait_for_content(fritzbox_page)
         fritzbox_page.wait_for_selector("#fritz-cable-ds-chart .uplot", timeout=5000)
@@ -276,17 +294,21 @@ class TestSegmentSmoothing:
         toggle = fritzbox_page.locator('#fritz-cable-range-tabs [data-toggle="smooth"]')
         assert toggle.count() == 1, "the segment charts need their own smoothing toggle"
         assert toggle.get_attribute("aria-pressed") == "false"
-        assert segment_smoothed(fritzbox_page, "fritz-cable-ds-chart") == [False, False]
+        raw = segment_plotted(fritzbox_page, "fritz-cable-ds-chart")
+        assert set(raw[0][20:40]) == {40.0, 41.0, 42.0, 43.0, 44.0}, (
+            "the planted sawtooth must reach the chart unfiltered"
+        )
 
         toggle.click()
         fritzbox_page.wait_for_function(
-            """() => {
-                const spline = uPlot.paths.spline().toString();
-                return window.charts['fritz-cable-ds-chart'].series[1].paths.toString() === spline;
-            }"""
+            "() => window.charts['fritz-cable-ds-chart'].data[1][20] === 42"
         )
-        assert segment_smoothed(fritzbox_page, "fritz-cable-ds-chart") == [True, True]
-        assert segment_smoothed(fritzbox_page, "fritz-cable-us-chart") == [True, True]
+        smoothed = segment_plotted(fritzbox_page, "fritz-cable-ds-chart")
+        assert set(smoothed[0][20:40]) == {42.0}, "the rolling median must flatten the sawtooth"
+        assert smoothed[0][10] == 90.0, "the 90 % spike keeps its height and its index"
+        assert set(segment_plotted(fritzbox_page, "fritz-cable-us-chart")[0][20:40]) == {42.0}, (
+            "the toggle covers both charts"
+        )
         assert toggle.get_attribute("aria-pressed") == "true"
 
         fritzbox_page.reload()
@@ -294,7 +316,7 @@ class TestSegmentSmoothing:
         navigate_to_segment(fritzbox_page)
         wait_for_content(fritzbox_page)
         fritzbox_page.wait_for_selector("#fritz-cable-ds-chart .uplot", timeout=5000)
-        assert segment_smoothed(fritzbox_page, "fritz-cable-ds-chart") == [True, True], (
+        assert set(segment_plotted(fritzbox_page, "fritz-cable-ds-chart")[0][20:40]) == {42.0}, (
             "the smooth toggle must survive a page reload"
         )
         reloaded_toggle = fritzbox_page.locator('#fritz-cable-range-tabs [data-toggle="smooth"]')
@@ -302,12 +324,11 @@ class TestSegmentSmoothing:
 
         reloaded_toggle.click()
         fritzbox_page.wait_for_function(
-            """() => {
-                const spline = uPlot.paths.spline().toString();
-                return window.charts['fritz-cable-ds-chart'].series[1].paths.toString() !== spline;
-            }"""
+            "() => window.charts['fritz-cable-ds-chart'].data[1][20] !== 42"
         )
-        assert segment_smoothed(fritzbox_page, "fritz-cable-ds-chart") == [False, False]
+        assert segment_plotted(fritzbox_page, "fritz-cable-ds-chart") == raw, (
+            "switching smoothing off restores the raw samples"
+        )
 
 
 # ── API Endpoints ──

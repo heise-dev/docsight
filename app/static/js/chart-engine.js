@@ -8,6 +8,12 @@ var currentView = 'live';
 var DEFAULT_Y_AXIS_SIZE = 58;
 var DEFAULT_ZOOM_Y_AXIS_SIZE = 64;
 var DEFAULT_X_EDGE_PADDING = 1.5;
+/* Jitter filter: samples per centred rolling-median window (odd, raise to flatten more) */
+var SMOOTH_WINDOW = 5;
+/* A sample this far off the local median is a real spike and stays unfiltered (ms/%) */
+var SMOOTH_SPIKE_ABS = 10;
+/* ... same, relative to the local median (1.0 = twice the median); the larger of both wins */
+var SMOOTH_SPIKE_REL = 1.0;
 
 /* ── Shared Helpers ── */
 // TEMPERATURE_UNIT is set by index.html; default to celsius if not present
@@ -22,6 +28,45 @@ function fmtTempAxis(celsius) {
     if (TEMPERATURE_UNIT === 'fahrenheit') return Math.round(celsius * 9 / 5 + 32) + '°';
     return celsius.toFixed(0) + '°';
 }
+/**
+ * Flatten small jitter out of a plotted line without moving its real spikes:
+ * every sample is replaced by the median of the SMOOTH_WINDOW samples centred on
+ * it, unless it sits further from that median than max(spikeAbs, spikeRel x median)
+ * - then the raw value is kept, so an outage edge or a 15 -> 60 ms spike keeps its
+ * height and its index. Nulls are loss gaps: they stay null and are never bridged,
+ * and a sample with fewer than two non-null neighbours is left alone.
+ * The caller keeps the raw array for stats, bands, clipping and the tooltip.
+ * @param {Array<number|null>} values - raw series
+ * @param {{window?:number, spikeAbs?:number, spikeRel?:number}} [opts]
+ * @returns {Array<number|null>} a new, filtered array
+ */
+function docsightSmoothSeries(values, opts) {
+    if (!values || values.length === 0) return values;
+    var o = opts || {};
+    var half = Math.floor((o.window || SMOOTH_WINDOW) / 2);
+    var spikeAbs = o.spikeAbs !== undefined ? o.spikeAbs : SMOOTH_SPIKE_ABS;
+    var spikeRel = o.spikeRel !== undefined ? o.spikeRel : SMOOTH_SPIKE_REL;
+    var out = new Array(values.length);
+    for (var i = 0; i < values.length; i++) {
+        var raw = values[i];
+        out[i] = raw;
+        if (raw == null) continue;
+        var win = [];
+        var from = Math.max(0, i - half);
+        var to = Math.min(values.length - 1, i + half);
+        for (var j = from; j <= to; j++) {
+            if (values[j] != null) win.push(values[j]);
+        }
+        if (win.length < 3) continue;
+        win.sort(function(a, b) { return a - b; });
+        var mid = win.length >> 1;
+        var median = win.length % 2 ? win[mid] : (win[mid - 1] + win[mid]) / 2;
+        if (Math.abs(raw - median) > Math.max(spikeAbs, spikeRel * median)) continue;
+        out[i] = median;
+    }
+    return out;
+}
+
 function fmtK(v) {
     if (v == null) return '';
     var abs = Math.abs(v);
@@ -199,8 +244,8 @@ function zoomPlugin() {
 /**
  * The filled region of one band helper series: its own stroke closed down to the
  * series' fillTo baseline, produced by that series' OWN path builder so the
- * envelope follows whatever interpolation the helper uses - linear by default, a
- * spline once the caller sets ds.smooth. uPlot always installs a fill function on
+ * envelope follows whatever interpolation the helper uses - linear by default,
+ * stepped for a stepped caller. uPlot always installs a fill function on
  * a series, so every builder returns a closed _paths.fill with direction-correct
  * endpoints. The index window is the one uPlot's own drawSeries passes - one point
  * beyond the visible range, then outwards past leading/trailing nulls - so on a
@@ -514,8 +559,6 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
 
     /* Determine bar path renderer */
     var barPaths = isBar ? uPlot.paths.bars({size: [0.7, 50], gap: 1}) : null;
-    /* Shared spline renderer, built on the first dataset that opts into smoothing */
-    var smoothPaths = null;
 
     allDatasets.forEach(function(ds) {
         var showPoints = ds.showPoints;
@@ -542,11 +585,6 @@ function renderChart(canvasId, labels, datasets, type, zones, opts) {
         if (ds.stepped) {
             s.paths = uPlot.paths.stepped({ align: -1 });
             s.width = 2;
-        }
-        /* Opt-in smoothing; bars and stepped lines keep their own renderer */
-        if (ds.smooth && !isBar && !ds.stepped) {
-            if (!smoothPaths) smoothPaths = uPlot.paths.spline();
-            s.paths = smoothPaths;
         }
         if (ds.dashed) {
             s.dash = [5, 5];
@@ -865,7 +903,6 @@ function openChartZoom(canvasId) {
 
         /* Series */
         var barPaths = isBar ? uPlot.paths.bars({size: [0.7, 50], gap: 1}) : null;
-        var zoomSmoothPaths = null;
         var uSeries = [{ label: 'X', value: function(u, v) { return params.labels[v] || ''; } }];
         params.datasets.forEach(function(ds) {
             var zoomShowPoints = ds.showPoints;
@@ -886,10 +923,6 @@ function openChartZoom(canvasId) {
             if (ds.fillTo !== undefined && ds.fillTo !== null) s.fillTo = ds.fillTo;
             if (isBar) { s.paths = barPaths; s.points = { show: false }; }
             if (ds.stepped) { s.paths = uPlot.paths.stepped({ align: -1 }); s.width = 2; }
-            if (ds.smooth && !isBar && !ds.stepped) {
-                if (!zoomSmoothPaths) zoomSmoothPaths = uPlot.paths.spline();
-                s.paths = zoomSmoothPaths;
-            }
             if (ds.dashed) { s.dash = [5, 5]; }
             uSeries.push(s);
         });
