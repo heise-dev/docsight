@@ -300,6 +300,35 @@ class TestTrendsRangeEndpoint:
             4_295_659_550,
         ]
 
+    def test_trend_unwrap_seeds_from_every_wrap_before_the_visible_cutoff(self, client):
+        flask_client, storage = client
+        for delta, correctable_errors in (
+            (timedelta(days=80), 4_000_000_000),
+            (timedelta(days=60), 100_000_000),
+            (timedelta(days=30), 4_200_000_000),
+            (timedelta(days=2), 50_000_000),
+            (timedelta(minutes=20), 60_000_000),
+            (timedelta(minutes=10), 70_000_000),
+        ):
+            _insert_snapshot(
+                storage,
+                _analysis(
+                    2.0,
+                    ds_correctable_errors=correctable_errors,
+                    ds_uncorrectable_errors=0,
+                ),
+                _utc_ts(delta),
+            )
+
+        resp = flask_client.get("/api/trends?range=1d")
+
+        assert resp.status_code == 200
+        data = json.loads(resp.data)
+        assert [row["ds_correctable_errors"] for row in data] == [
+            8_649_934_592,
+            8_659_934_592,
+        ]
+
     def test_trend_error_counter_unwrap_is_stable_across_ranges(self, client):
         flask_client, storage = client
         _insert_snapshot(
