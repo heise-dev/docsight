@@ -708,6 +708,7 @@
   "notify_per_event": "Czasy odnowienia w zależności od wydarzenia",
   "notify_per_event_desc": "Wyłącz zdarzenia lub ustaw indywidualne liczniki czasu odnowienia",
   "notify_col_active": "Aktywne",
+  "notify_toggle_all": "Włącz lub wyłącz wszystkie",
   "notify_col_event": "Wydarzenie",
   "notify_col_severity": "Dotkliwość",
   "notify_col_cooldown": "Czas odnowienia (s)",

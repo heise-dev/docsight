@@ -708,6 +708,7 @@
   "notify_per_event": "Cooldowns per evenement",
   "notify_per_event_desc": "Schakel evenementen uit of stel individuele cooldown-timers in",
   "notify_col_active": "Actief",
+  "notify_toggle_all": "Alles in- of uitschakelen",
   "notify_col_event": "Evenement",
   "notify_col_severity": "Ernst",
   "notify_col_cooldown": "Afkoeling(en)",

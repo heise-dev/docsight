@@ -708,6 +708,7 @@
   "notify_per_event": "Ψυχαγωγία ανά εκδήλωση",
   "notify_per_event_desc": "Απενεργοποιήστε τα συμβάντα ή ρυθμίστε μεμονωμένους χρονομετρητές ψύξης",
   "notify_col_active": "Ενεργός",
+  "notify_toggle_all": "Ενεργοποίηση ή απενεργοποίηση όλων",
   "notify_col_event": "Εκδήλωση",
   "notify_col_severity": "Σοβαρότητα",
   "notify_col_cooldown": "Cooldown (α)",

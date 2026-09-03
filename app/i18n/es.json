@@ -703,6 +703,7 @@
   "notify_per_event": "Tiempos de espera por evento",
   "notify_per_event_desc": "Desactivar eventos o establecer tiempos de espera individuales",
   "notify_col_active": "Activo",
+  "notify_toggle_all": "Activar o desactivar todo",
   "notify_col_event": "Evento",
   "notify_col_severity": "Severidad",
   "notify_col_cooldown": "Tiempo de espera (s)",

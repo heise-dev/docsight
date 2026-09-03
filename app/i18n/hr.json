@@ -708,6 +708,7 @@
   "notify_per_event": "Hlađenja po događaju",
   "notify_per_event_desc": "Onemogućite događaje ili postavite pojedinačne mjerače vremena za hlađenje",
   "notify_col_active": "Aktivno",
+  "notify_toggle_all": "Uključi ili isključi sve",
   "notify_col_event": "Događaj",
   "notify_col_severity": "Ozbiljnost",
   "notify_col_cooldown": "Hlađenje (s)",

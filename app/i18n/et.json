@@ -708,6 +708,7 @@
   "notify_per_event": "Sündmuse jahtumine",
   "notify_per_event_desc": "Keela sündmused või määrake individuaalsed jahtumistaimerid",
   "notify_col_active": "Aktiivne",
+  "notify_toggle_all": "Luba või keela kõik",
   "notify_col_event": "Sündmus",
   "notify_col_severity": "Raskusaste",
   "notify_col_cooldown": "Jahtumine (s)",

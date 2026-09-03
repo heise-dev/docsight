@@ -708,6 +708,7 @@
   "notify_per_event": "Nedkylningar per evenemang",
   "notify_per_event_desc": "Inaktivera händelser eller ställ in individuella nedkylningstimer",
   "notify_col_active": "Aktiv",
+  "notify_toggle_all": "Aktivera eller inaktivera alla",
   "notify_col_event": "Event",
   "notify_col_severity": "Allvarlighet",
   "notify_col_cooldown": "Nedkylning (s)",

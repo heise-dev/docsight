@@ -611,6 +611,10 @@ button.notification-collapse-button {
 .toggle input:checked + .toggle-slider::before {
   transform: translateX(20px);
 }
+/* a master toggle over a mixed set of rows parks its knob half-way */
+.toggle input:indeterminate + .toggle-slider::before {
+  transform: translateX(10px);
+}
 
 /* ─── Buttons ─── */
 .btn {

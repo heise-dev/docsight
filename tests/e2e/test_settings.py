@@ -1,5 +1,6 @@
 """E2E tests for the settings page."""
 
+import json
 import re
 
 import pytest
@@ -1125,6 +1126,57 @@ class TestSettingsInstantToggleSave:
         expect(footer).not_to_have_class(re.compile(r".*\bvisible\b.*"))
         assert len(config_payloads) == 1
         assert config_payloads[0]["events_badge_muted_types"] == '["cm_packet_loss_warning"]'
+
+    def test_notification_master_toggle_disables_every_event_in_one_save(self, settings_page):
+        config_payloads = []
+
+        def capture_config(route):
+            config_payloads.append(route.request.post_data_json)
+            route.fulfill(json={"success": True})
+
+        settings_page.route("**/api/config", capture_config)
+        settings_page.locator('button[data-section="notifications"]').click()
+        settings_page.locator('#per-event-cooldowns .card-header').click()
+        row_count = settings_page.locator('.notify-event-row').count()
+
+        with settings_page.expect_request("**/api/config"):
+            settings_page.locator('.notify-toggle-all + .toggle-slider').click()
+        expect(settings_page.locator('.notify-event-row .notify-toggle:checked')).to_have_count(0)
+        assert len(config_payloads) == 1
+        cooldowns = json.loads(config_payloads[0]["notify_cooldowns"])
+        assert len(cooldowns) == row_count
+        assert set(cooldowns.values()) == {0}
+
+        with settings_page.expect_request("**/api/config"):
+            settings_page.locator('.notify-toggle-all + .toggle-slider').click()
+        expect(settings_page.locator('.notify-event-row .notify-toggle:checked')).to_have_count(row_count)
+        assert len(config_payloads) == 2
+        assert json.loads(config_payloads[1]["notify_cooldowns"]) == {}
+
+    def test_event_badge_master_toggle_mutes_every_type_in_one_save(self, settings_page):
+        config_payloads = []
+
+        def capture_config(route):
+            config_payloads.append(route.request.post_data_json)
+            route.fulfill(json={"success": True})
+
+        settings_page.route("**/api/config", capture_config)
+        settings_page.locator('button[data-section="notifications"]').click()
+        settings_page.locator('#event-badge-types .card-header').click()
+        row_count = settings_page.locator('.badge-event-row').count()
+        assert row_count == 14
+
+        with settings_page.expect_request("**/api/config"):
+            settings_page.locator('.badge-count-toggle-all + .toggle-slider').click()
+        expect(settings_page.locator('.badge-event-row .badge-count-toggle:checked')).to_have_count(0)
+        assert len(config_payloads) == 1
+        assert len(json.loads(config_payloads[0]["events_badge_muted_types"])) == row_count
+
+        with settings_page.expect_request("**/api/config"):
+            settings_page.locator('.badge-count-toggle-all + .toggle-slider').click()
+        expect(settings_page.locator('.badge-event-row .badge-count-toggle:checked')).to_have_count(row_count)
+        assert len(config_payloads) == 2
+        assert config_payloads[1]["events_badge_muted_types"] == "[]"
 
     def test_notification_cooldown_value_saves_immediately(self, settings_page):
         config_payloads = []

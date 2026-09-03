@@ -708,6 +708,7 @@
   "notify_per_event": "Abklingzeiten pro Ereignis",
   "notify_per_event_desc": "Ereignisse deaktivieren oder individuelle Abklingzeiten setzen",
   "notify_col_active": "Aktiv",
+  "notify_toggle_all": "Alle aktivieren oder deaktivieren",
   "notify_col_event": "Ereignis",
   "notify_col_severity": "Schweregrad",
   "notify_col_cooldown": "Abklingzeit (s)",

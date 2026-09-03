@@ -708,6 +708,7 @@
   "notify_per_event": "Tempos de Recarga por Evento",
   "notify_per_event_desc": "Desative eventos ou defina temporizadores de resfriamento individuais",
   "notify_col_active": "Ativo",
+  "notify_toggle_all": "Ativar ou desativar tudo",
   "notify_col_event": "Evento",
   "notify_col_severity": "Gravidade",
   "notify_col_cooldown": "Recarga(s)",

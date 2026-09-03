@@ -708,6 +708,7 @@
   "notify_per_event": "Време за изчакване на събитие",
   "notify_per_event_desc": "Деактивирайте събития или задайте индивидуални таймери за охлаждане",
   "notify_col_active": "Активен",
+  "notify_toggle_all": "Включване или изключване на всички",
   "notify_col_event": "Събитие",
   "notify_col_severity": "Тежест",
   "notify_col_cooldown": "Време за изчакване (s)",

@@ -708,6 +708,7 @@
   "notify_per_event": "Timp de recădere per eveniment",
   "notify_per_event_desc": "Dezactivați evenimentele sau setați temporizatoarele individuale de răcire",
   "notify_col_active": "Activ",
+  "notify_toggle_all": "Activează sau dezactivează toate",
   "notify_col_event": "Eveniment",
   "notify_col_severity": "Severitate",
   "notify_col_cooldown": "Timp(e) de răcire",

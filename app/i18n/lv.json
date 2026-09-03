@@ -708,6 +708,7 @@
   "notify_per_event": "Atdzesēšana katrā notikumā",
   "notify_per_event_desc": "Atspējojiet notikumus vai iestatiet atsevišķus atdzišanas taimerus",
   "notify_col_active": "Aktīvs",
+  "notify_toggle_all": "Iespējot vai atspējot visus",
   "notify_col_event": "Pasākums",
   "notify_col_severity": "Smagums",
   "notify_col_cooldown": "Atdzesēšana (s)",

@@ -192,7 +192,7 @@
         <table class="cooldown-table">
             <thead>
                 <tr>
-                    <th>{{ t.notify_col_active }}</th>
+                    <th><span style="display:flex;align-items:center;gap:8px;"><label class="toggle" aria-label="{{ t.notify_toggle_all }}"><input type="checkbox" class="notify-toggle-all" checked><span class="toggle-slider"></span></label>{{ t.notify_col_active }}</span></th>
                     <th>{{ t.notify_col_event }}</th>
                     <th>{{ t.notify_col_severity }}</th>
                     <th>{{ t.notify_col_cooldown }}</th>
@@ -257,7 +257,7 @@
         <table class="cooldown-table">
             <thead>
                 <tr>
-                    <th>{{ t.events_badge_col_count }}</th>
+                    <th><span style="display:flex;align-items:center;gap:8px;"><label class="toggle" aria-label="{{ t.notify_toggle_all }}"><input type="checkbox" class="badge-count-toggle-all" checked><span class="toggle-slider"></span></label>{{ t.events_badge_col_count }}</span></th>
                     <th>{{ t.notify_col_event }}</th>
                 </tr>
             </thead>

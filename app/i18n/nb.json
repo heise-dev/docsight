@@ -708,6 +708,7 @@
   "notify_per_event": "Nedkjøling per hendelse",
   "notify_per_event_desc": "Deaktiver hendelser eller still individuelle nedkjølingstidtakere",
   "notify_col_active": "Aktiv",
+  "notify_toggle_all": "Aktiver eller deaktiver alle",
   "notify_col_event": "Arrangement",
   "notify_col_severity": "Alvorlighetsgrad",
   "notify_col_cooldown": "Nedkjøling (er)",
