@@ -492,7 +492,7 @@ var CMCharts = (function() {
      * @param {Object} bandByLabel - Line label -> {min, max} arrays, as the tooltip uses.
      * @param {Array<number>} lossIndices - Indices with packet loss.
      */
-    function readoutPlugin(labels, bandByLabel, lossIndices) {
+    function readoutPlugin(labels, bandByLabel, rawByLabel, lossIndices) {
         var readout = null;  // looked up once per render, not per cursor frame
         var lossSet = {};
         lossIndices.forEach(function(idx) { lossSet[idx] = true; });
@@ -542,7 +542,9 @@ var CMCharts = (function() {
                     for (var i = 1; i < u.series.length; i++) {
                         var s = u.series[i];
                         if (!s.show) continue;
-                        var val = u.data[i][idx];
+                        // Raw sample, like the desktop tooltip; the line may be filtered
+                        var raw = rawByLabel[s.label];
+                        var val = raw ? raw[idx] : u.data[i][idx];
                         if (val == null) continue;
                         var text = s.label + ' ' + val.toFixed(1) + ' ms';
                         var band = bandByLabel[s.label];
@@ -696,6 +698,9 @@ var CMCharts = (function() {
         var shownBandMax = [];
         // Line label -> its min/max arrays, for the band values in the tooltip
         var bandByLabel = {};
+        // Line label -> its unfiltered samples, so the tooltip and the readout stay exact
+        // while smoothing plots a filtered series
+        var rawByLabel = {};
 
         allTargetData.forEach(function(td, tIdx) {
             var shown = targetControls(td.target.id);
@@ -731,26 +736,28 @@ var CMCharts = (function() {
                 color: color,
                 hasBand: hasAggregated
             });
+            rawByLabel[label] = data;
+            // Smoothing filters the plotted line only; everything else keeps reading raw
+            // (the ceiling, clip hints, loss markers, the band and the tooltip)
             // Explicit show: the strip, not the engine's carried-over legend map, decides
             datasets.push({
                 label: label,
-                data: data,
+                data: controls.smooth ? docsightSmoothSeries(data) : data,
                 color: color,
                 spanGaps: false,
                 dashed: hasAggregated ? true : undefined,
-                smooth: controls.smooth,
                 show: shown.line
             });
             if (shown.line) shownLines.push(data);
             // A switched-off band is not pushed at all, so it leaves the y ceiling,
             // the tooltip, the zoom y scan and the zoom modal in one move.
             if (hasAggregated && shown.band) {
-                // The helpers carry the same smoothing so bandPlugin's envelope,
-                // which is built from their own path builders, follows the line
+                // The envelope stays raw: it is already a min/max hull, and filtering it
+                // would narrow the very outliers it exists to show
                 datasets.push({ data: minData, color: 'transparent', label: label + ' min',
-                    smooth: controls.smooth, show: false });
+                    show: false });
                 datasets.push({ data: maxData, color: 'transparent', label: label + ' max',
-                    smooth: controls.smooth, show: false });
+                    show: false });
                 // uPlot series[0] is x-axis, so data indices are offset by +1
                 var bandColor = color.replace(/[\d.]+\)$/, '0.12)');
                 bandPlugins.push(bandPlugin(datasets.length - 1, datasets.length, bandColor));
@@ -820,7 +827,7 @@ var CMCharts = (function() {
         // a tooltip the finger covers. Desktop keeps drag-zoom and the tooltip.
         var touchUi = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
         var touchPlugins = touchUi ?
-            [touchPlugin(), readoutPlugin(labels, bandByLabel, lossIndices)] : [];
+            [touchPlugin(), readoutPlugin(labels, bandByLabel, rawByLabel, lossIndices)] : [];
 
         renderChart(containerId, labels, datasets, 'line', zones, {
             yMin: 0,
@@ -836,7 +843,9 @@ var CMCharts = (function() {
             maxHeight: 440,
             heightRatio: 0.42,
             tooltipLabelCallback: function(ctx) {
-                var val = ctx.parsed.y;
+                // The raw sample, not the plotted one - a filtered line is a reading aid
+                var raw = rawByLabel[ctx.dataset.label];
+                var val = raw ? raw[ctx.dataIndex] : ctx.parsed.y;
                 if (val == null) return '';
                 var text = ctx.dataset.label + ': ' + val.toFixed(1) + ' ms';
                 var band = bandByLabel[ctx.dataset.label];

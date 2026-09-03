@@ -257,14 +257,22 @@ def _cm_series(page):
     )
 
 
-def _cm_smoothed(page):
-    """Whether each series of the combined chart uses uPlot's spline path builder."""
+def _cm_plotted(page):
+    """The arrays the combined chart plots: the line first, then its band helpers."""
     return page.evaluate(
-        """() => {
-            const spline = uPlot.paths.spline().toString();
-            return window.charts['cm-combined-chart'].series.slice(1).map(
-                (s) => ({label: s.label, spline: !!s.paths && s.paths.toString() === spline}));
-        }"""
+        "() => window.charts['cm-combined-chart'].data.slice(1).map((a) => Array.from(a))"
+    )
+
+
+def _cm_tooltip(page, index):
+    """The tooltip line the chart would print for the first series at ``index``."""
+    return page.evaluate(
+        """(i) => {
+            const u = window.charts['cm-combined-chart'];
+            return u._docsightParams.opts.tooltipLabelCallback(
+                {parsed: {y: u.data[1][i]}, dataset: {label: u.series[1].label}, dataIndex: i});
+        }""",
+        index,
     )
 
 
@@ -637,38 +645,42 @@ def test_connection_monitor_loss_marker_follows_the_line_toggle(demo_page):
     )
 
 
-def test_connection_monitor_smooth_toggle_splines_the_line_and_its_band(demo_page):
-    """Smoothing is opt-in, covers the band helpers too, and survives a reload."""
+def test_connection_monitor_smooth_toggle_filters_jitter_and_keeps_the_spike(demo_page):
+    """Smoothing filters the plotted line only - band, spike and tooltip stay raw."""
     page = demo_page
-    _stub_connection_monitor_api(page, outlier_index=-1, band_max=400, loss_index=7)
+    _stub_connection_monitor_api(page, band_max=400)
     _open_connection_monitor_chart(page)
     _reload_cm_range(page, 86400)
 
-    assert [s["spline"] for s in _cm_smoothed(page)] == [False, False, False], (
-        "smoothing must stay off until the user asks for it"
+    raw = _cm_plotted(page)
+    assert set(raw[0][20:200]) == {50.0, 51.0, 52.0, 53.0, 54.0}, (
+        "the stub's 4 ms sawtooth must reach the chart unfiltered"
     )
     smooth_toggle = page.locator("#cm-chart-controls [data-toggle='smooth']")
     expect(smooth_toggle).to_have_attribute("aria-pressed", "false")
 
     _cm_toggle(page, "#cm-chart-controls [data-toggle='smooth']")
-    smoothed = _cm_smoothed(page)
-    assert [s["spline"] for s in smoothed] == [True, True, True], (
-        f"the line and both band helpers must share the spline builder: {smoothed}"
+    smoothed = _cm_plotted(page)
+    assert set(smoothed[0][20:200]) == {52.0}, (
+        f"the rolling median must flatten the sawtooth: {smoothed[0][20:30]}"
+    )
+    assert smoothed[0][5] == 1000.0, "the 1000 ms spike keeps its height and its index"
+    assert smoothed[1:] == raw[1:], "the min/max band helpers keep reading raw samples"
+    assert _cm_tooltip(page, 20).endswith("50.0 ms (min 45.0 \u00b7 max 400.0)"), (
+        f"the tooltip must report the raw sample: {_cm_tooltip(page, 20)}"
     )
     expect(smooth_toggle).to_have_attribute("aria-pressed", "true")
     assert _cm_chart_flags(page)["lossMarkers"] is True, "smoothing must not disturb the other controls"
 
     _open_connection_monitor_chart(page)
     _reload_cm_range(page, 86400)
-    assert [s["spline"] for s in _cm_smoothed(page)] == [True, True, True], (
+    assert set(_cm_plotted(page)[0][20:200]) == {52.0}, (
         "the smooth toggle must survive a page reload"
     )
     expect(smooth_toggle).to_have_attribute("aria-pressed", "true")
 
     _cm_toggle(page, "#cm-chart-controls [data-toggle='smooth']")
-    assert [s["spline"] for s in _cm_smoothed(page)] == [False, False, False], (
-        "switching smoothing off restores the straight lines"
-    )
+    assert _cm_plotted(page) == raw, "switching smoothing off restores the raw samples"
 
 
 def test_connection_monitor_clip_spikes_caps_the_axis_and_marks_the_clipped_samples(demo_page):

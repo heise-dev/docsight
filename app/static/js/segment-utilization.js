@@ -5,6 +5,9 @@ var _FRITZ_CABLE_CHART_KEY = 'docsight-segment-utilization-chart';
 
 /* Chart display options, persisted per browser. Smoothing is off by default. */
 var _fritzCableChartOpts = _fritzCableLoadChartOpts();
+/* Percentage points a sample may sit off the local median before the jitter filter
+   leaves it alone; these charts are percent, not ms, so they need their own threshold */
+var _FRITZ_CABLE_SMOOTH_SPIKE = 15;
 /* Last _fritzCableRenderChart() arguments per canvas, so the smooth toggle can
    re-render the same samples without refetching. */
 var _fritzCableRenderArgs = {};
@@ -359,19 +362,26 @@ function _fritzCableRenderChart(containerId, samples, totalKey, ownKey) {
     // Cached so the smooth toggle can re-render the same samples (see the toggle handler)
     _fritzCableRenderArgs[containerId] = { samples: samples, totalKey: totalKey, ownKey: ownKey };
 
+    var totalData = samples.map(function(s) { return s[totalKey]; });
+    var ownData = samples.map(function(s) { return s[ownKey]; });
+    /* Smoothing filters the plotted values; the tooltip below reads them, so a
+       hovered number always matches the line it belongs to */
+    if (_fritzCableChartOpts.smooth) {
+        totalData = docsightSmoothSeries(totalData, { spikeAbs: _FRITZ_CABLE_SMOOTH_SPIKE });
+        ownData = docsightSmoothSeries(ownData, { spikeAbs: _FRITZ_CABLE_SMOOTH_SPIKE });
+    }
+
     var datasets = [
         {
             label: _fcT('total', 'Total'),
-            data: samples.map(function(s) { return s[totalKey]; }),
-            color: 'rgba(168,85,247,0.9)', fill: 'rgba(168,85,247,0.15)',
-            smooth: _fritzCableChartOpts.smooth
+            data: totalData,
+            color: 'rgba(168,85,247,0.9)', fill: 'rgba(168,85,247,0.15)'
         },
         {
             label: _fcT('own', 'Own Share'),
-            data: samples.map(function(s) { return s[ownKey]; }),
+            data: ownData,
             color: '#6366f1',
-            dashed: true,
-            smooth: _fritzCableChartOpts.smooth
+            dashed: true
         }
     ];
 
