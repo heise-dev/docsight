@@ -708,6 +708,7 @@
   "notify_per_event": "Ohladitve na dogodek",
   "notify_per_event_desc": "Onemogočite dogodke ali nastavite posamezne časovnike za ohlajanje",
   "notify_col_active": "Aktivno",
+  "notify_toggle_all": "Omogoči ali onemogoči vse",
   "notify_col_event": "Dogodek",
   "notify_col_severity": "Resnost",
   "notify_col_cooldown": "Ohladitev (s)",

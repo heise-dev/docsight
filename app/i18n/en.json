@@ -708,6 +708,7 @@
   "notify_per_event": "Per-Event Cooldowns",
   "notify_per_event_desc": "Disable events or set individual cooldown timers",
   "notify_col_active": "Active",
+  "notify_toggle_all": "Enable or disable all",
   "notify_col_event": "Event",
   "notify_col_severity": "Severity",
   "notify_col_cooldown": "Cooldown (s)",

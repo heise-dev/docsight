@@ -708,6 +708,7 @@
   "notify_per_event": "Tapahtumakohtaiset jäädytykset",
   "notify_per_event_desc": "Poista tapahtumat käytöstä tai aseta yksittäisiä jäähdytysajastimia",
   "notify_col_active": "Aktiivinen",
+  "notify_toggle_all": "Ota kaikki käyttöön tai poista käytöstä",
   "notify_col_event": "Tapahtuma",
   "notify_col_severity": "Vakavuus",
   "notify_col_cooldown": "Jäähdytys (s)",

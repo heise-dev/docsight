@@ -708,6 +708,7 @@
   "notify_per_event": "Atšalimas per įvykį",
   "notify_per_event_desc": "Išjunkite įvykius arba nustatykite atskirus atvėsimo laikmačius",
   "notify_col_active": "Aktyvus",
+  "notify_toggle_all": "Įjungti arba išjungti visus",
   "notify_col_event": "Renginys",
   "notify_col_severity": "Sunkumas",
   "notify_col_cooldown": "Atvėsimas (-ai)",

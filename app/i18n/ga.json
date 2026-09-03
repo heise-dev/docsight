@@ -708,6 +708,7 @@
   "notify_per_event": "Cooldowns Per-Event",
   "notify_per_event_desc": "Díchumasaigh imeachtaí nó socraigh amadóirí aonair fuarú",
   "notify_col_active": "Gníomhach",
+  "notify_toggle_all": "Cumasaigh nó díchumasaigh gach ceann",
   "notify_col_event": "imeacht",
   "notify_col_severity": "Déine",
   "notify_col_cooldown": "Cooldown(s)",

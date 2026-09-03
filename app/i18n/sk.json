@@ -708,6 +708,7 @@
   "notify_per_event": "Cooldowny na udalosť",
   "notify_per_event_desc": "Zakázať udalosti alebo nastaviť individuálne časovače ochladzovania",
   "notify_col_active": "Aktívne",
+  "notify_toggle_all": "Zapnúť alebo vypnúť všetko",
   "notify_col_event": "Udalosť",
   "notify_col_severity": "Závažnosť",
   "notify_col_cooldown": "Cooldown (y)",

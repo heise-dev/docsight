@@ -708,6 +708,7 @@
   "notify_per_event": "Tempi di recupero per evento",
   "notify_per_event_desc": "Disabilita eventi o imposta timer di raffreddamento individuali",
   "notify_col_active": "Attivo",
+  "notify_toggle_all": "Abilita o disabilita tutto",
   "notify_col_event": "Evento",
   "notify_col_severity": "Gravità",
   "notify_col_cooldown": "Recupero/i",

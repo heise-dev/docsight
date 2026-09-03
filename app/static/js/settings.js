@@ -1653,7 +1653,7 @@ function initInstantSettingsToggles() {
     var form = document.getElementById('settings-form');
     if (!form) return;
     var selector = [
-        'label.toggle input[type="checkbox"]:not(#theme-toggle-appearance):not(.module-toggle-input):not(.notify-toggle)',
+        'label.toggle input[type="checkbox"]:not(#theme-toggle-appearance):not(.module-toggle-input):not(.notify-toggle):not(.notify-toggle-all):not(.badge-count-toggle-all)',
         'label.switch input[type="checkbox"]'
     ].join(',');
     form.querySelectorAll(selector).forEach(function(toggle) {
@@ -1712,6 +1712,46 @@ function initEventBadgeControls() {
     } catch(e) {}
 }
 
+/**
+ * Wire the "enable/disable all" toggle in a table header to its row toggles.
+ * The master mirrors the rows (checked / unchecked / indeterminate) and a
+ * click applies its state to every row, then saves once.
+ */
+function initToggleAllControl(masterSelector, rowToggleSelector, applyRowState) {
+    var master = document.querySelector(masterSelector);
+    var toggles = document.querySelectorAll(rowToggleSelector);
+    if (!master || !toggles.length) return;
+    function syncMaster() {
+        var checked = 0;
+        toggles.forEach(function(toggle) { if (toggle.checked) checked++; });
+        master.checked = checked === toggles.length;
+        master.indeterminate = checked > 0 && checked < toggles.length;
+    }
+    master.addEventListener('change', function() {
+        master.indeterminate = false;
+        toggles.forEach(function(toggle) {
+            toggle.checked = master.checked;
+            if (applyRowState) applyRowState(toggle);
+        });
+        _saveSettingsInstantly();
+    });
+    toggles.forEach(function(toggle) {
+        toggle.addEventListener('change', syncMaster);
+    });
+    syncMaster();
+}
+
+function initNotificationToggleAllControls() {
+    initToggleAllControl('.notify-toggle-all', '.notify-event-row .notify-toggle', function(toggle) {
+        var row = toggle.closest('.notify-event-row');
+        var inp = row ? row.querySelector('.notify-cooldown-input') : null;
+        if (!inp) return;
+        inp.disabled = !toggle.checked;
+        inp.style.opacity = toggle.checked ? '1' : '0.4';
+    });
+    initToggleAllControl('.badge-count-toggle-all', '.badge-event-row .badge-count-toggle');
+}
+
 /* ── Init ── */
 document.addEventListener('DOMContentLoaded', function() {
     if (typeof lucide !== 'undefined') lucide.createIcons();
@@ -1722,6 +1762,7 @@ document.addEventListener('DOMContentLoaded', function() {
     initInstantSettingsToggles();
     initNotificationCooldownControls();
     initEventBadgeControls();
+    initNotificationToggleAllControls();
     refreshPwaPushStatus();
     initTimezoneHint();
     onIspChange();

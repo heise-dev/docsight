@@ -708,6 +708,7 @@
   "notify_per_event": "Eseményenkénti lehűlés",
   "notify_per_event_desc": "Tiltsa le az eseményeket, vagy állítson be egyedi lehűlési időzítőket",
   "notify_col_active": "Aktív",
+  "notify_toggle_all": "Összes engedélyezése vagy letiltása",
   "notify_col_event": "Esemény",
   "notify_col_severity": "Súlyosság",
   "notify_col_cooldown": "Lehűlés (ek)",
