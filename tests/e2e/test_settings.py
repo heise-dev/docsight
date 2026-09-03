@@ -465,6 +465,21 @@ class TestSettingsFormElements:
         assert metrics["panelScrollHeight"] < 2000
         assert metrics["panelScrollHeight"] > metrics["mainClientHeight"]
 
+    def test_notifications_event_table_hints_collapse_with_the_card(self, settings_page):
+        settings_page.locator('button[data-section="notifications"]').click()
+
+        for card_id in ["per-event-cooldowns", "event-badge-types"]:
+            card = settings_page.locator(f"#{card_id}")
+            expect(card).to_have_class(re.compile(r".*\bcollapsed\b.*"))
+            assert card.locator('.card-collapse-body').bounding_box()["height"] < 1
+            card.locator('.card-header').click()
+            expect(card).not_to_have_class(re.compile(r".*\bcollapsed\b.*"))
+            settings_page.wait_for_function(
+                "id => document.querySelector('#' + id + ' .card-collapse-body').getBoundingClientRect().height > 1",
+                arg=card_id,
+            )
+            assert card.locator('.form-hint').bounding_box()["height"] > 1
+
     def test_smart_capture_form_controls_use_shared_visual_contract(self, settings_page):
         settings_page.locator('button[data-section="smart_capture"]').click()
         controls = [
@@ -1083,6 +1098,7 @@ class TestSettingsInstantToggleSave:
 
         settings_page.route("**/api/config", capture_config)
         settings_page.locator('button[data-section="notifications"]').click()
+        settings_page.locator('#per-event-cooldowns .card-header').click()
         with settings_page.expect_request("**/api/config"):
             settings_page.locator('.notify-event-row[data-event="health_change"][data-severity="critical"] .toggle-slider').click()
 
@@ -1101,6 +1117,7 @@ class TestSettingsInstantToggleSave:
 
         settings_page.route("**/api/config", capture_config)
         settings_page.locator('button[data-section="notifications"]').click()
+        settings_page.locator('#event-badge-types .card-header').click()
         with settings_page.expect_request("**/api/config"):
             settings_page.locator('.badge-event-row[data-event="cm_packet_loss_warning"] .toggle-slider').click()
 
@@ -1134,6 +1151,7 @@ class TestSettingsInstantToggleSave:
 
         settings_page.route("**/api/config", fail_config)
         settings_page.locator('button[data-section="notifications"]').click()
+        settings_page.locator('#per-event-cooldowns .card-header').click()
         with settings_page.expect_request("**/api/config"):
             settings_page.locator('.notify-event-row[data-event="health_change"][data-severity="critical"] .toggle-slider').click()
 
@@ -1150,6 +1168,7 @@ class TestSettingsInstantToggleSave:
 
         settings_page.route("**/api/config", capture_config)
         settings_page.locator('button[data-section="notifications"]').click()
+        settings_page.locator('#per-event-cooldowns .card-header').click()
         with settings_page.expect_request("**/api/config"):
             settings_page.locator('.notify-event-row[data-event="health_change"][data-severity="critical"] .toggle-slider').click()
         settings_page.locator('button[data-section="connection"]').click()
