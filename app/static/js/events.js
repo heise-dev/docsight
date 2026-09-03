@@ -279,11 +279,13 @@ function loadEvents(append) {
             loading.style.display = 'none';
             var events = data.events || [];
             var unack = data.unacknowledged_count || 0;
+            // Badge count leaves out the event types muted in the settings.
+            var badgeCount = data.badge_count === undefined ? unack : (data.badge_count || 0);
 
             // Events and unack count are natively filtered by the backend.
             var eventsViewEl = document.getElementById('view-events');
             if (badgeRequestId === _badgeRequestCount && eventsViewEl && eventsViewEl.classList.contains('active')) {
-                updateEventBadge(unack);
+                updateEventBadge(badgeCount);
             }
 
             if (feedRequestId === _eventsRequestCount) {

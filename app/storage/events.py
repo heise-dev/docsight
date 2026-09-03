@@ -101,7 +101,7 @@ class EventMethods:
             results.append(event)
         return results
 
-    def get_event_count(self, acknowledged=None, exclude_operational: bool = False, event_prefix: str | None = None, severity: str | None = None):
+    def get_event_count(self, acknowledged=None, exclude_operational: bool = False, event_prefix: str | None = None, severity: str | None = None, exclude_types: list[str] | None = None):
         """Return event count, optionally filtered by status, type or severity."""
         query = "SELECT COUNT(*) FROM events"
         conditions = []
@@ -117,6 +117,10 @@ class EventMethods:
         if severity:
             conditions.append("severity = ?")
             params.append(severity)
+        if exclude_types:
+            placeholders = ", ".join("?" * len(exclude_types))
+            conditions.append(f"event_type NOT IN ({placeholders})")
+            params.extend(exclude_types)
 
         if conditions:
             query += " WHERE " + " AND ".join(conditions)

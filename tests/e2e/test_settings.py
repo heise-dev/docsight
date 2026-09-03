@@ -1092,6 +1092,23 @@ class TestSettingsInstantToggleSave:
         cooldowns = config_payloads[0]["notify_cooldowns"]
         assert '"health_change:critical":0' in cooldowns.replace(" ", "")
 
+    def test_event_badge_toggle_saves_muted_types_immediately(self, settings_page):
+        config_payloads = []
+
+        def capture_config(route):
+            config_payloads.append(route.request.post_data_json)
+            route.fulfill(json={"success": True})
+
+        settings_page.route("**/api/config", capture_config)
+        settings_page.locator('button[data-section="notifications"]').click()
+        with settings_page.expect_request("**/api/config"):
+            settings_page.locator('.badge-event-row[data-event="cm_packet_loss_warning"] .toggle-slider').click()
+
+        footer = settings_page.locator("#save-footer")
+        expect(footer).not_to_have_class(re.compile(r".*\bvisible\b.*"))
+        assert len(config_payloads) == 1
+        assert config_payloads[0]["events_badge_muted_types"] == '["cm_packet_loss_warning"]'
+
     def test_notification_cooldown_value_saves_immediately(self, settings_page):
         config_payloads = []
 

@@ -29,6 +29,7 @@
     window.currentLang = bootstrap.language;
     window.currentTz = bootstrap.currentTimezone;
     window.savedCooldowns = bootstrap.notificationCooldowns;
+    window.savedBadgeMutedTypes = bootstrap.badgeMutedTypes;
     window.DRIVER_HINTS = bootstrap.driverHints;
     window.MODULE_SECRET_FIELDS = bootstrap.moduleSecretFields;
     window.SAVED_MODULE_SECRET_FIELDS = bootstrap.savedModuleSecretFields;

@@ -11,6 +11,7 @@ from flask import Blueprint, request, jsonify, Response
 from app.web import (
     require_auth,
     get_storage,
+    get_config_manager,
     _localize_timestamps,
 )
 
@@ -44,6 +45,20 @@ def _event_filters_from_request():
         "acknowledged": _acknowledged_from_request(),
         "exclude_operational": request.args.get("exclude_operational", "false").lower() == "true",
     }
+
+
+def _badge_muted_types():
+    """Return the event types the user excluded from the unacknowledged badge count."""
+    config_manager = get_config_manager()
+    if not config_manager:
+        return []
+    try:
+        muted = json.loads(config_manager.get("events_badge_muted_types", "[]"))
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(muted, list):
+        return []
+    return [event_type for event_type in muted if isinstance(event_type, str)]
 
 
 def _csv_cell(value):
@@ -89,7 +104,7 @@ def api_events_list():
     """Return list of events with optional filters."""
     _storage = get_storage()
     if not _storage:
-        return jsonify({"events": [], "unacknowledged_count": 0})
+        return jsonify({"events": [], "unacknowledged_count": 0, "badge_count": 0})
     limit = request.args.get("limit", 200, type=int)
     offset = request.args.get("offset", 0, type=int)
     try:
@@ -102,14 +117,18 @@ def api_events_list():
         event_type=filters["event_type"], acknowledged=filters["acknowledged"],
         exclude_operational=filters["exclude_operational"], event_prefix=filters["event_prefix"]
     )
-    unack = _storage.get_event_count(
-        acknowledged=0,
-        exclude_operational=filters["exclude_operational"],
-        event_prefix=filters["event_prefix"],
-        severity=filters["severity"]
-    )
+    count_filters = {
+        "acknowledged": 0,
+        "exclude_operational": filters["exclude_operational"],
+        "event_prefix": filters["event_prefix"],
+        "severity": filters["severity"],
+    }
+    # The badge leaves out the muted types, the acknowledge-all count never does.
+    muted_types = _badge_muted_types()
+    unack = _storage.get_event_count(**count_filters)
+    badge_count = _storage.get_event_count(exclude_types=muted_types, **count_filters) if muted_types else unack
     _localize_timestamps(events)
-    return jsonify({"events": events, "unacknowledged_count": unack})
+    return jsonify({"events": events, "unacknowledged_count": unack, "badge_count": badge_count})
 
 
 @events_bp.route("/api/events/export.csv", methods=["GET"])
@@ -150,7 +169,8 @@ def api_events_count():
         acknowledged=0,
         exclude_operational=exclude_operational,
         event_prefix=event_prefix,
-        severity=severity
+        severity=severity,
+        exclude_types=_badge_muted_types()
     )
     return jsonify({"count": count})
 
