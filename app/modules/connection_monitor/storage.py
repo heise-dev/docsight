@@ -288,6 +288,11 @@ class ConnectionMonitorStorage:
         reading every row. Rows are shaped like get_aggregated_samples(); the
         latency stats cover every sample that carries a latency (timeouts only
         add to the sample count and to packet loss) and p95 is nearest-rank.
+
+        The totals come from a plain GROUP BY, which SQLite answers by grouping
+        the indexed range; only the nearest-rank p95 needs an ordered read, and
+        that one runs per bucket over a few hundred rows instead of ordering
+        the whole window once per bucket boundary.
         """
         params = {
             "target_id": target_id,
@@ -296,55 +301,68 @@ class ConnectionMonitorStorage:
             "width": bucket_seconds,
             "anchor": anchor,
         }
+        buckets = []
         with self._read() as conn:
             rows = conn.execute(
                 """
-                SELECT bucket_idx, sample_count, timeout_count, avg_latency_ms,
-                       min_latency_ms, max_latency_ms, latency_ms AS p95_latency_ms
+                SELECT bucket_idx,
+                       COUNT(*) AS sample_count,
+                       SUM(timeout) AS timeout_count,
+                       COUNT(latency_ms) AS latency_count,
+                       AVG(latency_ms) AS avg_latency_ms,
+                       MIN(latency_ms) AS min_latency_ms,
+                       MAX(latency_ms) AS max_latency_ms,
+                       MIN(timestamp) AS first_ts,
+                       MAX(timestamp) AS last_ts
                 FROM (
-                    SELECT bucket_idx, latency_ms,
-                           ROW_NUMBER() OVER ordered AS rn,
-                           COUNT(*) OVER whole AS sample_count,
-                           SUM(timeout) OVER whole AS timeout_count,
-                           COUNT(latency_ms) OVER whole AS latency_count,
-                           AVG(latency_ms) OVER whole AS avg_latency_ms,
-                           MIN(latency_ms) OVER whole AS min_latency_ms,
-                           MAX(latency_ms) OVER whole AS max_latency_ms
-                    FROM (
-                        SELECT CAST((timestamp - :anchor) / :width AS INTEGER) AS bucket_idx,
-                               latency_ms, timeout
-                        FROM connection_samples
-                        WHERE target_id = :target_id
-                          AND timestamp >= :start AND timestamp <= :end
-                    )
-                    WINDOW whole AS (PARTITION BY bucket_idx),
-                           ordered AS (PARTITION BY bucket_idx
-                                       ORDER BY latency_ms IS NULL, latency_ms)
+                    SELECT CAST((timestamp - :anchor) / :width AS INTEGER) AS bucket_idx,
+                           timestamp, latency_ms, timeout
+                    FROM connection_samples
+                    WHERE target_id = :target_id
+                      AND timestamp >= :start AND timestamp <= :end
                 )
-                -- one row per bucket: the nearest-rank p95 latency, which also
-                -- carries that bucket's totals. Buckets without a latency keep
-                -- their first row: p95 comes out NULL (the row's latency_ms is
-                -- NULL), the count/timeout totals stay correct.
-                WHERE rn = CAST(latency_count * 0.95 AS INTEGER) + 1
+                GROUP BY bucket_idx
                 ORDER BY bucket_idx
                 """,
                 params,
             ).fetchall()
-            return [
-                {
+            for r in rows:
+                p95_latency = None
+                if r["latency_count"]:
+                    # Buckets never interleave in time, so the first and last
+                    # timestamp of this one bound exactly its own samples and
+                    # the read stays on the (target_id, timestamp) index.
+                    p95_row = conn.execute(
+                        """
+                        SELECT latency_ms
+                        FROM connection_samples
+                        WHERE target_id = :target_id
+                          AND timestamp >= :first_ts AND timestamp <= :last_ts
+                          AND latency_ms IS NOT NULL
+                        ORDER BY latency_ms
+                        LIMIT 1 OFFSET :offset
+                        """,
+                        {
+                            "target_id": target_id,
+                            "first_ts": r["first_ts"],
+                            "last_ts": r["last_ts"],
+                            "offset": int(r["latency_count"] * 0.95),
+                        },
+                    ).fetchone()
+                    p95_latency = p95_row["latency_ms"] if p95_row else None
+                buckets.append({
                     "bucket_start": anchor + r["bucket_idx"] * bucket_seconds,
                     "bucket_seconds": bucket_seconds,
                     "avg_latency_ms": r["avg_latency_ms"],
                     "min_latency_ms": r["min_latency_ms"],
                     "max_latency_ms": r["max_latency_ms"],
-                    "p95_latency_ms": r["p95_latency_ms"],
+                    "p95_latency_ms": p95_latency,
                     "packet_loss_pct": round(
                         100.0 * r["timeout_count"] / r["sample_count"], 2
                     ),
                     "sample_count": r["sample_count"],
-                }
-                for r in rows
-            ]
+                })
+        return buckets
 
 
     def get_range_stats(
