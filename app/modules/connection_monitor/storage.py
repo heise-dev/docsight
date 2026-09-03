@@ -177,6 +177,34 @@ class ConnectionMonitorStorage:
             rows = conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
 
+    def get_minute_latency_buckets(
+        self,
+        target_id: int,
+        start: float | None = None,
+        end: float | None = None,
+    ) -> list[tuple[int, float, int]]:
+        """Aggregate successful latency samples into 60s buckets.
+
+        Returns (bucket_start, latency_sum, latency_count) per bucket so callers
+        can pool several targets into one mean without loading raw rows.
+        """
+        where, params = self._build_sample_where(target_id, start=start, end=end)
+        with self._read() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    CAST(timestamp / 60 AS INTEGER) * 60 AS bucket,
+                    SUM(latency_ms) AS latency_sum,
+                    COUNT(latency_ms) AS latency_count
+                FROM connection_samples
+                WHERE {where} AND timeout = 0 AND latency_ms IS NOT NULL
+                GROUP BY bucket
+                ORDER BY bucket
+                """,
+                params,
+            ).fetchall()
+            return [(int(r["bucket"]), float(r["latency_sum"]), int(r["latency_count"])) for r in rows]
+
     def get_range_stats(
         self,
         target_id: int,
