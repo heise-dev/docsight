@@ -86,20 +86,21 @@ def _append_connection_monitor_trends(data: list[dict], hours: int) -> None:
             return
 
         start_ts = datetime.now(timezone.utc).timestamp() - hours * 3600
-        buckets: dict[int, list[float]] = defaultdict(list)
+        # SQLite does the bucketing: a 1s probe interval yields tens of thousands
+        # of rows per target and window, far too many to materialise per request.
+        buckets: dict[int, list[float]] = defaultdict(lambda: [0.0, 0.0])
         for target in enabled_targets:
-            samples = [
-                sample for sample in storage.get_samples(target["id"], start=start_ts, limit=0)
-                if not sample.get("timeout") and sample.get("latency_ms") is not None
-            ]
-            for sample in samples:
-                bucket = int(sample["timestamp"] // 60) * 60
-                buckets[bucket].append(float(sample["latency_ms"]))
+            for bucket, latency_sum, latency_count in storage.get_minute_latency_buckets(
+                target["id"], start=start_ts
+            ):
+                totals = buckets[bucket]
+                totals[0] += latency_sum
+                totals[1] += latency_count
 
         aggregated = sorted(
-            (bucket, sum(values) / len(values))
-            for bucket, values in buckets.items()
-            if values
+            (bucket, latency_sum / latency_count)
+            for bucket, (latency_sum, latency_count) in buckets.items()
+            if latency_count
         )
         if len(aggregated) > 288:
             step = max(1, (len(aggregated) + 287) // 288)

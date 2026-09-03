@@ -174,6 +174,24 @@ class TestSamples:
         result = storage.get_samples(tid, limit=0)
         assert len(result) == 20
 
+    def test_get_minute_latency_buckets(self, storage):
+        """Buckets are 60s wide and only count successful latency samples."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        base = 1_700_000_040  # aligned to a full minute
+        storage.save_samples([
+            {"target_id": tid, "timestamp": base, "latency_ms": 10.0, "timeout": False, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": base + 59, "latency_ms": 20.0, "timeout": False, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": base + 30, "latency_ms": 999.0, "timeout": True, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": base + 31, "latency_ms": None, "timeout": False, "probe_method": "tcp"},
+            {"target_id": tid, "timestamp": base + 60, "latency_ms": 40.0, "timeout": False, "probe_method": "tcp"},
+        ])
+
+        assert storage.get_minute_latency_buckets(tid) == [
+            (base, 30.0, 2),
+            (base + 60, 40.0, 1),
+        ]
+        assert storage.get_minute_latency_buckets(tid, start=base + 60) == [(base + 60, 40.0, 1)]
+        assert storage.get_minute_latency_buckets(tid, end=base + 59) == [(base, 30.0, 2)]
     def test_get_samples_limit_above_row_count_matches_unlimited(self, storage):
         """A limit past the last row is the same read as no limit at all."""
         tid = storage.create_target("Test", "1.1.1.1")
