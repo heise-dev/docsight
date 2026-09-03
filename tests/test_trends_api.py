@@ -199,6 +199,61 @@ class TestTrendsRangeEndpoint:
         cm_rows = [row for row in data if row.get("source") == "connection_monitor"]
         assert [row["connection_monitor_latency_ms"] for row in cm_rows] == [20.5, 22.0]
 
+    def test_connection_monitor_latency_pools_targets_and_skips_failed_samples(self, client):
+        flask_client, storage = client
+        _insert_snapshot(storage, _analysis(2.0), _utc_ts(timedelta(minutes=20)))
+
+        manager = get_config_manager()
+        assert manager is not None
+        cm_storage = ConnectionMonitorStorage(str(Path(manager.data_dir) / "connection_monitor.db"))
+        target_id = cm_storage.create_target("Gateway", "192.0.2.1", enabled=True)
+        backup_target_id = cm_storage.create_target("Backup", "192.0.2.2", enabled=True)
+        bucket_ts = int((datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp() // 60) * 60
+        cm_storage.save_samples([
+            {
+                "target_id": target_id,
+                "timestamp": bucket_ts,
+                "latency_ms": 10.0,
+                "timeout": False,
+                "probe_method": "icmp",
+            },
+            {
+                "target_id": target_id,
+                "timestamp": bucket_ts + 1,
+                "latency_ms": 900.0,
+                "timeout": True,
+                "probe_method": "icmp",
+            },
+            {
+                "target_id": target_id,
+                "timestamp": bucket_ts + 2,
+                "latency_ms": None,
+                "timeout": False,
+                "probe_method": "icmp",
+            },
+            {
+                "target_id": backup_target_id,
+                "timestamp": bucket_ts + 3,
+                "latency_ms": 30.0,
+                "timeout": False,
+                "probe_method": "icmp",
+            },
+            {
+                "target_id": backup_target_id,
+                "timestamp": bucket_ts + 4,
+                "latency_ms": 50.0,
+                "timeout": False,
+                "probe_method": "icmp",
+            },
+        ])
+
+        resp = flask_client.get("/api/trends?range=1h")
+
+        assert resp.status_code == 200
+        data = json.loads(resp.data)
+        cm_rows = [row for row in data if row.get("source") == "connection_monitor"]
+        assert [row["connection_monitor_latency_ms"] for row in cm_rows] == [30.0]
+
     def test_legacy_ranges_still_validate_date_parameter(self, client):
         flask_client, storage = client
         storage.save_snapshot(_analysis(2.0))
