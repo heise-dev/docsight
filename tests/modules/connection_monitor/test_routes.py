@@ -851,6 +851,38 @@ class TestSummaryAPI:
         assert stats["p95_latency_ms"] == 30.0
         assert stats["tiers_used"] == ["raw"]
 
+    def test_get_range_stats_for_one_target(self, client):
+        """target_id narrows the read without changing the payload shape."""
+        c, storage = client
+        now = time.time()
+        first = storage.create_target("First", "1.1.1.1")
+        second = storage.create_target("Second", "8.8.8.8")
+        storage.save_samples([
+            {"target_id": tid, "timestamp": now - 10, "latency_ms": 10.0,
+             "timeout": False, "probe_method": "tcp"}
+            for tid in (first, second)
+        ])
+        resp = c.get(
+            f"/api/connection-monitor/stats?start={now - 60}&end={now}&target_id={second}"
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert list(data) == [str(second)]
+        assert data[str(second)] == (
+            c.get(f"/api/connection-monitor/stats?start={now - 60}&end={now}")
+            .get_json()[str(second)]
+        )
+
+    def test_get_range_stats_for_an_unknown_target(self, client):
+        c, storage = client
+        now = time.time()
+        storage.create_target("Test", "1.1.1.1")
+        resp = c.get(
+            f"/api/connection-monitor/stats?start={now - 60}&end={now}&target_id=999"
+        )
+        assert resp.status_code == 200
+        assert resp.get_json() == {}
+
     def test_get_range_stats_reads_aggregated_tiers(self, client):
         c, storage = client
         tid = storage.create_target("Test", "1.1.1.1")
