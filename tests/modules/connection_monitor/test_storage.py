@@ -5,6 +5,7 @@ import random
 import sqlite3
 import time
 from datetime import datetime
+from unittest.mock import patch
 import pytest
 
 from app.modules.connection_monitor.storage import ConnectionMonitorStorage
@@ -38,6 +39,14 @@ def _local_midday(timestamp):
     return datetime.fromtimestamp(timestamp).replace(
         hour=12, minute=0, second=0, microsecond=0
     ).timestamp()
+
+
+def _reference_weighted_p95(latencies, bucket_p95):
+    """Nearest-rank p95 over the fully expanded weighted sample."""
+    values = sorted(latencies + [v for v, weight in bucket_p95 for _ in range(weight)])
+    if not values:
+        return None
+    return values[max(1, math.ceil(len(values) * 0.95)) - 1]
 
 
 class TestTargetCRUD:
@@ -504,6 +513,27 @@ class TestSummary:
 class TestTieredRangeStats:
     """Windows reaching past the raw retention must read the bucket tiers."""
 
+    def test_a_seven_day_window_ending_now_opens_no_tier(self, storage):
+        """The range the UI sends must stay on the exact raw path.
+
+        The browser computes "now - 7d .. now" a moment before the server reads
+        its own clock, so the old end of the window reaches a hair past the raw
+        boundary. That sliver is narrower than a 60s bucket and holds nothing
+        the raw tier does not already cover.
+        """
+        client_now = 1_700_000_000.0
+        assert storage._aggregated_sub_windows(
+            client_now - 7 * 86400, client_now, client_now + 0.25
+        ) == []
+
+    def test_a_tier_slice_wider_than_one_bucket_is_kept(self, storage):
+        client_now = 1_700_000_000.0
+        windows = storage._aggregated_sub_windows(
+            client_now - 7 * 86400 - 600, client_now, client_now + 0.25
+        )
+        assert [w[0] for w in windows] == ["1min"]
+        assert windows[0][2] == client_now - 7 * 86400 - 600
+
     def test_range_stats_from_60s_buckets_only(self, storage):
         tid = storage.create_target("Test", "1.1.1.1")
         now = time.time()
@@ -597,6 +627,34 @@ class TestTieredRangeStats:
         # ceil(0.95 * 1010) = 960 <= 1000, so the wide bucket carries the p95;
         # an unweighted p95 (or max) of the two bucket p95s would say 500.0.
         assert stats["p95_latency_ms"] == 10.0
+
+    def test_range_stats_p95_matches_the_expanded_reference(self, storage):
+        """Reading only the slowest raw latencies must not move the p95."""
+        rng = random.Random(2026)
+        now = time.time()
+        base = ((now - 10 * 86400) // 60) * 60
+        for case in range(20):
+            tid = storage.create_target(f"Test {case}", "1.1.1.1")
+            latencies = [round(rng.uniform(5, 400), 3) for _ in range(rng.randint(0, 120))]
+            storage.save_samples([
+                {"target_id": tid, "timestamp": now - 60 - i, "latency_ms": latency,
+                 "timeout": False, "probe_method": "tcp"}
+                for i, latency in enumerate(latencies)
+            ])
+            buckets = []
+            weighted = []
+            for i in range(rng.randint(0, 8)):
+                count = rng.randint(1, 50)
+                p95 = round(rng.uniform(5, 400), 3)
+                buckets.append({
+                    "bucket_start": base + i * 60, "avg_latency_ms": p95,
+                    "min_latency_ms": p95, "max_latency_ms": p95, "p95_latency_ms": p95,
+                    "packet_loss_pct": 0.0, "sample_count": count,
+                })
+                weighted.append((p95, count))
+            _save_buckets(storage, tid, 60, buckets)
+            stats = storage.get_range_stats(tid, start=base, end=now)
+            assert stats["p95_latency_ms"] == _reference_weighted_p95(latencies, weighted)
 
     def test_range_stats_from_5min_and_1hr_buckets(self, storage):
         """An unbounded window must reach the coarser tiers too."""
@@ -1007,6 +1065,65 @@ class TestOutages:
         assert len(outages) == 1
         assert outages[0]["end"] is None
         assert outages[0]["duration_seconds"] == 25.0
+
+    def test_outage_run_is_cut_at_a_gap_in_raw_coverage(self, storage):
+        """A run reaching over a coverage gap is two outages, not one long one."""
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = time.time()
+        base = now - 10 * 86400
+        samples = [
+            {"target_id": tid, "timestamp": base + i * 5, "latency_ms": None,
+             "timeout": True, "probe_method": "tcp"}
+            for i in range(5)
+        ]
+        # two hours without a single sample: the collector was down, the outage
+        # on either side of it is not one outage of two hours
+        samples.extend([
+            {"target_id": tid, "timestamp": base + 7200 + i * 5, "latency_ms": None,
+             "timeout": True, "probe_method": "tcp"}
+            for i in range(5)
+        ])
+        samples.append({"target_id": tid, "timestamp": base + 7230, "latency_ms": 10.0,
+                        "timeout": False, "probe_method": "tcp"})
+        storage.save_samples(samples)
+        outages = storage.get_outages(tid, threshold=5, start=now - 30 * 86400, end=now)
+        assert [o["timeout_count"] for o in outages] == [5, 5]
+        assert outages[0]["end"] == base + 20
+        assert outages[1]["end"] == base + 7230
+
+    @pytest.mark.parametrize("loss", (0.0, 0.02, 0.3, 1.0))
+    def test_seeking_the_runs_matches_the_row_walk(self, loss, storage):
+        """Both ways of finding timeout runs must agree on random traffic."""
+        rng = random.Random(int(loss * 100))
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = float(int(time.time()))
+        samples = []
+        ts = now - 3600
+        while ts < now:
+            timeout = rng.random() < loss
+            samples.append({
+                "target_id": tid, "timestamp": ts, "probe_method": "tcp",
+                "timeout": timeout, "latency_ms": None if timeout else 10.0,
+            })
+            # an occasional hole in the coverage, sometimes mid-outage
+            ts += 5 if rng.random() > 0.01 else 5000
+        storage.save_samples(samples)
+        for window_start in (now - 3600, now - 30 * 86400):
+            outages = storage.get_outages(tid, threshold=3, start=window_start, end=now)
+            with patch.object(storage, "_timeout_runs", return_value=None):
+                walked = storage.get_outages(tid, threshold=3, start=window_start, end=now)
+            assert outages == walked
+
+    def test_flapping_window_falls_back_to_the_row_walk(self, storage):
+        tid = storage.create_target("Test", "1.1.1.1")
+        now = float(int(time.time()))
+        storage.save_samples([
+            {"target_id": tid, "timestamp": now - 3000 + i, "probe_method": "tcp",
+             "timeout": i % 2 == 0, "latency_ms": None if i % 2 == 0 else 10.0}
+            for i in range(2 * storage._MAX_TIMEOUT_RUNS + 2)
+        ])
+        assert storage._timeout_runs(tid, now - 3000, now) is None
+        assert storage.get_outages(tid, threshold=2, start=now - 3000, end=now) == []
 
     def test_outages_do_not_merge_across_a_tier_boundary(self, storage):
         """60s and 300s runs describe different resolutions and stay separate."""

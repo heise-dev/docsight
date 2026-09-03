@@ -382,8 +382,19 @@
                 .then(function(data) { return { target: t, samples: data.samples, meta: data.meta }; });
         });
 
-        var statsPromise = fetch(docsightUrl('/api/connection-monitor/stats?start=' + start + '&end=' + end))
-            .then(function(r) { return r.json(); });
+        // One request per target, like samples and outages: asked for all of
+        // them at once the server reads them one after the other, which makes
+        // the stats the slowest leg of a long range.
+        var statsPromise = Promise.all(targets.map(function(t) {
+            return fetch(docsightUrl('/api/connection-monitor/stats?start=' + start + '&end=' + end + '&target_id=' + t.id))
+                .then(function(r) { return r.json(); });
+        })).then(function(parts) {
+            var statsByTarget = {};
+            parts.forEach(function(part) {
+                Object.keys(part).forEach(function(key) { statsByTarget[key] = part[key]; });
+            });
+            return statsByTarget;
+        });
 
         // Fetch outages for ALL targets in parallel
         var outagePromises = targets.map(function(t) {

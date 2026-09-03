@@ -529,9 +529,15 @@ def api_get_range_stats():
     storage = _get_cm_storage()
     start = request.args.get("start", type=float)
     end = request.args.get("end", type=float)
+    # Reading every target in one request means reading them one after the
+    # other; target_id lets the page ask for them side by side, like it
+    # already does for samples and outages. The payload keeps its shape.
+    target_id = request.args.get("target_id", type=int)
     targets = storage.get_targets()
     stats = {}
     for t in targets:
+        if target_id is not None and t["id"] != target_id:
+            continue
         stats[t["id"]] = storage.get_range_stats(
             t["id"],
             start=start,

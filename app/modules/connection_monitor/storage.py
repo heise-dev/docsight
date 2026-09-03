@@ -203,6 +203,13 @@ class ConnectionMonitorStorage:
         part newer than _TIER_RAW_MAX_AGE, the 60s/300s/3600s buckets cover
         progressively older parts. Upper bounds are made exclusive so a
         sample can never be counted in two tiers.
+
+        A sub-window narrower than one bucket of its tier is dropped: the only
+        bucket that can start in it spans past its end, into time the newer
+        tier already covers. The browser sends "now - 7d .. now" a moment
+        before the server reads its own clock, so an exact 7d range always
+        leaves such a sliver - and reading it would pull the whole request onto
+        the blended path for data the raw tier holds exactly.
         """
         range_start = start if start is not None else float("-inf")
         range_end = end if end is not None else now
@@ -215,12 +222,12 @@ class ConnectionMonitorStorage:
             ("1hr", 3600, None, self._TIER_300S_MAX_AGE),
         ):
             tier_start = range_start if max_age is None else max(range_start, now - max_age)
-            tier_end = _exclusive_upper_bound(min(range_end, now - newer_age))
-            if tier_start <= tier_end:
+            tier_end = min(range_end, now - newer_age)
+            if tier_end - tier_start >= bucket_seconds:
                 windows.append((
                     name, bucket_seconds,
                     None if tier_start == float("-inf") else tier_start,
-                    tier_end,
+                    _exclusive_upper_bound(tier_end),
                 ))
         return windows
 
@@ -281,6 +288,11 @@ class ConnectionMonitorStorage:
         reading every row. Rows are shaped like get_aggregated_samples(); the
         latency stats cover every sample that carries a latency (timeouts only
         add to the sample count and to packet loss) and p95 is nearest-rank.
+
+        The totals come from a plain GROUP BY, which SQLite answers by grouping
+        the indexed range; only the nearest-rank p95 needs an ordered read, and
+        that one runs per bucket over a few hundred rows instead of ordering
+        the whole window once per bucket boundary.
         """
         params = {
             "target_id": target_id,
@@ -289,55 +301,71 @@ class ConnectionMonitorStorage:
             "width": bucket_seconds,
             "anchor": anchor,
         }
+        buckets = []
         with self._read() as conn:
             rows = conn.execute(
                 """
-                SELECT bucket_idx, sample_count, timeout_count, avg_latency_ms,
-                       min_latency_ms, max_latency_ms, latency_ms AS p95_latency_ms
+                SELECT bucket_idx,
+                       COUNT(*) AS sample_count,
+                       SUM(timeout) AS timeout_count,
+                       COUNT(latency_ms) AS latency_count,
+                       AVG(latency_ms) AS avg_latency_ms,
+                       MIN(latency_ms) AS min_latency_ms,
+                       MAX(latency_ms) AS max_latency_ms,
+                       MIN(timestamp) AS first_ts,
+                       MAX(timestamp) AS last_ts
                 FROM (
-                    SELECT bucket_idx, latency_ms,
-                           ROW_NUMBER() OVER ordered AS rn,
-                           COUNT(*) OVER whole AS sample_count,
-                           SUM(timeout) OVER whole AS timeout_count,
-                           COUNT(latency_ms) OVER whole AS latency_count,
-                           AVG(latency_ms) OVER whole AS avg_latency_ms,
-                           MIN(latency_ms) OVER whole AS min_latency_ms,
-                           MAX(latency_ms) OVER whole AS max_latency_ms
-                    FROM (
-                        SELECT CAST((timestamp - :anchor) / :width AS INTEGER) AS bucket_idx,
-                               latency_ms, timeout
-                        FROM connection_samples
-                        WHERE target_id = :target_id
-                          AND timestamp >= :start AND timestamp <= :end
-                    )
-                    WINDOW whole AS (PARTITION BY bucket_idx),
-                           ordered AS (PARTITION BY bucket_idx
-                                       ORDER BY latency_ms IS NULL, latency_ms)
+                    SELECT CAST((timestamp - :anchor) / :width AS INTEGER) AS bucket_idx,
+                           timestamp, latency_ms, timeout
+                    FROM connection_samples
+                    WHERE target_id = :target_id
+                      AND timestamp >= :start AND timestamp <= :end
                 )
-                -- one row per bucket: the nearest-rank p95 latency, which also
-                -- carries that bucket's totals. Buckets without a latency keep
-                -- their first row: p95 comes out NULL (the row's latency_ms is
-                -- NULL), the count/timeout totals stay correct.
-                WHERE rn = CAST(latency_count * 0.95 AS INTEGER) + 1
+                GROUP BY bucket_idx
                 ORDER BY bucket_idx
                 """,
                 params,
             ).fetchall()
-            return [
-                {
+            for r in rows:
+                p95_latency = None
+                if r["latency_count"]:
+                    # Buckets never interleave in time, so the first and last
+                    # timestamp of this one bound exactly its own samples and
+                    # the read stays on the (target_id, timestamp) index. The
+                    # nearest-rank sample is counted from the slowest end, so
+                    # the bounded sorter keeps the bucket's tail, not its bulk.
+                    p95_row = conn.execute(
+                        """
+                        SELECT latency_ms
+                        FROM connection_samples
+                        WHERE target_id = :target_id
+                          AND timestamp >= :first_ts AND timestamp <= :last_ts
+                          AND latency_ms IS NOT NULL
+                        ORDER BY latency_ms DESC
+                        LIMIT 1 OFFSET :offset
+                        """,
+                        {
+                            "target_id": target_id,
+                            "first_ts": r["first_ts"],
+                            "last_ts": r["last_ts"],
+                            "offset": r["latency_count"] - 1
+                            - int(r["latency_count"] * 0.95),
+                        },
+                    ).fetchone()
+                    p95_latency = p95_row["latency_ms"] if p95_row else None
+                buckets.append({
                     "bucket_start": anchor + r["bucket_idx"] * bucket_seconds,
                     "bucket_seconds": bucket_seconds,
                     "avg_latency_ms": r["avg_latency_ms"],
                     "min_latency_ms": r["min_latency_ms"],
                     "max_latency_ms": r["max_latency_ms"],
-                    "p95_latency_ms": r["p95_latency_ms"],
+                    "p95_latency_ms": p95_latency,
                     "packet_loss_pct": round(
                         100.0 * r["timeout_count"] / r["sample_count"], 2
                     ),
                     "sample_count": r["sample_count"],
-                }
-                for r in rows
-            ]
+                })
+        return buckets
 
     def get_minute_latency_buckets(
         self,
@@ -418,13 +446,16 @@ class ConnectionMonitorStorage:
             stats = dict(row) if row else {}
             latency_count = stats.get("latency_count") or 0
             if latency_count > 0:
-                p95_offset = max(0, math.ceil(latency_count * 0.95) - 1)
+                # Same nearest-rank sample, counted from the slowest end: the
+                # bounded sorter then only has to keep the top 5% of the window
+                # instead of ordering all of it.
+                p95_offset = latency_count - self._p95_rank(latency_count)
                 p95_row = conn.execute(
                     f"""
                     SELECT latency_ms
                     FROM connection_samples
                     WHERE {where} AND timeout = 0 AND latency_ms IS NOT NULL
-                    ORDER BY latency_ms
+                    ORDER BY latency_ms DESC
                     LIMIT 1 OFFSET ?
                     """,
                     [*params, p95_offset],
@@ -451,8 +482,9 @@ class ConnectionMonitorStorage:
         timeout_total = 0.0
         min_latency = None
         max_latency = None
-        # Bucket p95 stand-ins as (value, weight); raw latencies stay a plain
-        # sorted float list so a 30d window never materialises 100k+ tuples.
+        # Bucket p95 stand-ins as (value, weight); the raw side stays in
+        # SQLite until the weights are known, then only its slowest values are
+        # read - a 30d window never materialises 100k+ latencies.
         bucket_p95: list[tuple[float, int]] = []
 
         where, params = self._build_sample_where(target_id, start=start, end=end)
@@ -471,19 +503,6 @@ class ConnectionMonitorStorage:
                 """,
                 params,
             ).fetchone()
-            # The ordered list only feeds the quantile walk; the totals above
-            # come straight from SQLite.
-            latencies = [
-                r[0] for r in conn.execute(
-                    f"""
-                    SELECT latency_ms
-                    FROM connection_samples
-                    WHERE {where} AND timeout = 0 AND latency_ms IS NOT NULL
-                    ORDER BY latency_ms
-                    """,
-                    params,
-                )
-            ]
         if row["sample_count"]:
             tiers_used.append("raw")
             sample_count += row["sample_count"]
@@ -525,7 +544,16 @@ class ConnectionMonitorStorage:
                 if b["p95_latency_ms"] is not None:
                     bucket_p95.append((b["p95_latency_ms"], latency_est))
 
-        p95_latency = self._weighted_p95(latencies, bucket_p95)
+        # The quantile walk starts at the slowest value and stops at the rank,
+        # so the raw side only has to supply the values above it: at most the
+        # top 5% of the window plus one.
+        raw_latencies = row["latency_count"] or 0
+        total_weight = raw_latencies + sum(w for _, w in bucket_p95)
+        tail = self._slowest_raw_latencies(
+            where, params,
+            min(raw_latencies, total_weight - self._p95_rank(total_weight) + 1),
+        )
+        p95_latency = self._weighted_p95(tail, raw_latencies, bucket_p95)
 
         return {
             "sample_count": sample_count,
@@ -541,36 +569,71 @@ class ConnectionMonitorStorage:
         }
 
     @staticmethod
+    def _p95_rank(total_weight: int) -> int:
+        """1-based nearest-rank position of the p95 in a weighted window."""
+        return max(1, math.ceil(total_weight * 0.95))
+
+    def _slowest_raw_latencies(
+        self,
+        where: str,
+        params: list,
+        limit: int,
+    ) -> list[float]:
+        """The slowest raw latencies of a window, slowest first.
+
+        A bounded ORDER BY costs SQLite a top-N sorter instead of ordering
+        every latency in the window.
+        """
+        if limit <= 0:
+            return []
+        with self._read() as conn:
+            return [
+                r[0] for r in conn.execute(
+                    f"""
+                    SELECT latency_ms
+                    FROM connection_samples
+                    WHERE {where} AND timeout = 0 AND latency_ms IS NOT NULL
+                    ORDER BY latency_ms DESC
+                    LIMIT ?
+                    """,
+                    [*params, limit],
+                )
+            ]
+
+    @classmethod
     def _weighted_p95(
-        latencies: list[float],
+        cls,
+        raw_tail: list[float],
+        raw_count: int,
         bucket_p95: list[tuple[float, int]],
     ) -> float | None:
         """Weighted nearest-rank p95 over raw values plus bucket stand-ins.
 
-        Both inputs are walked two-pointer style, so no combined list is built
-        and the raw side reuses the ordering SQL already produced.
+        Both inputs are walked two-pointer style from the slowest value down,
+        counting the remaining weight towards the rank. Walking down rather
+        than up keeps the raw side to ``raw_tail``, the slowest values of the
+        window; ``raw_count`` is how many raw latencies it stands for.
         """
-        raw_len = len(latencies)
+        raw_len = len(raw_tail)
         bucket_len = len(bucket_p95)
-        total_weight = raw_len + sum(w for _, w in bucket_p95)
+        total_weight = raw_count + sum(w for _, w in bucket_p95)
         if total_weight <= 0:
             return None
-        bucket_p95.sort(key=lambda pair: pair[0])
-        rank = max(1, math.ceil(total_weight * 0.95))
-        cumulative = 0
+        bucket_p95.sort(key=lambda pair: pair[0], reverse=True)
+        rank = cls._p95_rank(total_weight)
+        remaining = total_weight
         value = None
         i = j = 0
         while i < raw_len or j < bucket_len:
-            if j >= bucket_len or (i < raw_len and latencies[i] <= bucket_p95[j][0]):
-                value = latencies[i]
-                cumulative += 1
+            if j >= bucket_len or (i < raw_len and raw_tail[i] >= bucket_p95[j][0]):
+                value, weight = raw_tail[i], 1
                 i += 1
             else:
                 value, weight = bucket_p95[j]
-                cumulative += weight
                 j += 1
-            if cumulative >= rank:
+            if remaining - weight < rank:
                 break
+            remaining -= weight
         return value
 
     # --- Summary ---
@@ -677,6 +740,87 @@ class ConnectionMonitorStorage:
     # polls is still one outage, and no setting caps poll_interval_ms.
     _RAW_COVERAGE_GAP = 3600
 
+    # More runs than this in one window is a flapping link, not a list of
+    # outages: seeking run by run then costs more than reading the window row
+    # by row, so the row walk takes over.
+    _MAX_TIMEOUT_RUNS = 1000
+
+    def _timeout_runs(
+        self,
+        target_id: int,
+        start: float | None,
+        end: float | None,
+        max_gap: float | None = None,
+    ) -> list[dict] | None:
+        """Maximal runs of consecutive timeout samples, found by seeking.
+
+        Two indexed seeks and one COUNT per run rather than one Python row per
+        sample: the first timeout at or after the cursor opens a run, the first
+        successful sample after it closes it, and every row in between is a
+        timeout by construction. Rows sharing a timestamp are ordered by id,
+        the order the index hands the row walk them in.
+
+        Returns None when the window holds more than _MAX_TIMEOUT_RUNS runs, or
+        when a run reaches wider than max_gap - a caller that cuts runs at gaps
+        in raw coverage has to walk those windows row by row to place the cut.
+        """
+        runs: list[dict] = []
+        cursor_ts, cursor_id = start, None
+        with self._read() as conn:
+            while True:
+                where, params = self._build_sample_where(target_id, start=cursor_ts, end=end)
+                clauses = f"{where} AND timeout <> 0"
+                if cursor_id is not None:
+                    clauses += " AND (timestamp > ? OR id > ?)"
+                    params = [*params, cursor_ts, cursor_id]
+                opening = conn.execute(
+                    f"SELECT timestamp, id FROM connection_samples WHERE {clauses}"
+                    " ORDER BY timestamp LIMIT 1",
+                    params,
+                ).fetchone()
+                if opening is None:
+                    return runs
+
+                run_start = opening["timestamp"]
+                where, params = self._build_sample_where(target_id, start=run_start, end=end)
+                closing = conn.execute(
+                    f"SELECT timestamp, id FROM connection_samples WHERE {where}"
+                    " AND timeout = 0 AND (timestamp > ? OR id > ?)"
+                    " ORDER BY timestamp LIMIT 1",
+                    [*params, run_start, opening["id"]],
+                ).fetchone()
+
+                run_end = closing["timestamp"] if closing is not None else None
+                where, params = self._build_sample_where(
+                    target_id, start=run_start, end=end if run_end is None else run_end,
+                )
+                clauses = f"{where} AND (timestamp > ? OR id >= ?)"
+                params = [*params, run_start, opening["id"]]
+                if closing is not None:
+                    clauses += " AND (timestamp < ? OR id < ?)"
+                    params = [*params, run_end, closing["id"]]
+                totals = conn.execute(
+                    "SELECT COUNT(*) AS timeout_count, MAX(timestamp) AS last_ts"
+                    f" FROM connection_samples WHERE {clauses}",
+                    params,
+                ).fetchone()
+
+                if max_gap is not None and (
+                    (run_end if run_end is not None else totals["last_ts"]) - run_start
+                ) > max_gap:
+                    return None
+                runs.append({
+                    "start": run_start,
+                    "end": run_end,
+                    "last_ts": totals["last_ts"],
+                    "timeout_count": totals["timeout_count"],
+                })
+                if closing is None:
+                    return runs
+                if len(runs) > self._MAX_TIMEOUT_RUNS:
+                    return None
+                cursor_ts, cursor_id = run_end, closing["id"]
+
     def _raw_outage_candidates(
         self,
         target_id: int,
@@ -687,6 +831,21 @@ class ConnectionMonitorStorage:
         target = self.get_target(target_id)
         poll_interval_ms = (target or {}).get("poll_interval_ms") or 0
         max_gap = max(self._RAW_COVERAGE_GAP, 5 * poll_interval_ms / 1000.0)
+
+        runs = self._timeout_runs(target_id, start, end, max_gap=max_gap)
+        if runs is not None:
+            # No run reaches over a coverage gap, so no segment can cut one and
+            # the newest run is the one in the newest segment.
+            return [{
+                "start": run["start"],
+                "end": run["end"] if run["end"] is not None else run["last_ts"],
+                "duration_end": run["end"] if run["end"] is not None else run["last_ts"],
+                "timeout_count": run["timeout_count"],
+                "approximate": False,
+                "bucket_seconds": None,
+                # no terminating sample, so this run may still be open
+                "open": run["end"] is None,
+            } for run in runs]
 
         where, params = self._build_sample_where(target_id, start=start, end=end)
         with self._read() as conn:
@@ -800,6 +959,19 @@ class ConnectionMonitorStorage:
         end: float | None,
     ) -> list[dict]:
         """Derive outages from consecutive timeout sequences in raw samples."""
+        runs = self._timeout_runs(target_id, start, end)
+        if runs is not None:
+            return [{
+                "start": run["start"],
+                # a run without a terminating sample is still running
+                "end": run["end"],
+                "duration_seconds": round(
+                    (run["end"] if run["end"] is not None else run["last_ts"])
+                    - run["start"], 1,
+                ),
+                "timeout_count": run["timeout_count"],
+            } for run in runs if run["timeout_count"] >= threshold]
+
         clauses = ["target_id = ?"]
         params: list[object] = [target_id]
         if start is not None:
