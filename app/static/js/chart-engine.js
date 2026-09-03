@@ -11,9 +11,9 @@ var DEFAULT_X_EDGE_PADDING = 1.5;
 /* Jitter filter: samples per centred rolling-median window (odd, raise to flatten more) */
 var SMOOTH_WINDOW = 5;
 /* A sample this far off the local median is a real spike and stays unfiltered (ms/%) */
-var SMOOTH_SPIKE_ABS = 10;
-/* ... same, relative to the local median (1.0 = twice the median); the larger of both wins */
-var SMOOTH_SPIKE_REL = 1.0;
+var SMOOTH_SPIKE_ABS = 8;
+/* ... same, relative to the local median (0.5 = one and a half times the median); the larger of both wins */
+var SMOOTH_SPIKE_REL = 0.5;
 
 /* ── Shared Helpers ── */
 // TEMPERATURE_UNIT is set by index.html; default to celsius if not present
