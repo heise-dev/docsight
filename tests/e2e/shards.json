@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "expected_total": 588,
+  "expected_total": 589,
   "baseline_cpu_seconds": 1534.372,
   "shards": [
     {
@@ -44,7 +44,7 @@
     },
     {
       "id": 4,
-      "collected_cases": 168,
+      "collected_cases": 169,
       "files": [
         "test_channels.py",
         "test_events.py",
