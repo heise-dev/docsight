@@ -146,6 +146,17 @@ class TestEventStorage:
         assert storage.get_event_count(severity="info") == 1
         assert storage.get_event_count(severity="critical") == 0
 
+    def test_event_count_with_exclude_types(self, storage):
+        ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        storage.save_event(ts, "warning", "cm_packet_loss_warning", "Loss")
+        storage.save_event(ts, "critical", "cm_target_unreachable", "Down")
+        storage.save_event(ts, "warning", "power_change", "Msg")
+        excluded = ["cm_packet_loss_warning", "cm_target_unreachable"]
+        assert storage.get_event_count(acknowledged=0, exclude_types=excluded) == 1
+        assert storage.get_event_count(acknowledged=0, exclude_types=[]) == 3
+        # The feed itself is unaffected
+        assert len(storage.get_events()) == 3
+
     def test_acknowledge_event(self, storage):
         ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         eid = storage.save_event(ts, "warning", "power_change", "Msg")
@@ -1153,6 +1164,52 @@ class TestEventsAPI:
         resp = client.get("/api/events/count?event_prefix=device_")
         data = json.loads(resp.data)
         assert data["count"] == 1
+
+    def test_events_count_skips_badge_muted_types(self, client, api_storage):
+        ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        api_storage.save_event(ts, "warning", "cm_packet_loss_warning", "Loss")
+        api_storage.save_event(ts, "warning", "power_change", "Power change")
+        current_runtime().config_manager.save(
+            {"events_badge_muted_types": json.dumps(["cm_packet_loss_warning"])}
+        )
+        resp = client.get("/api/events/count")
+        assert json.loads(resp.data)["count"] == 1
+
+    def test_events_list_mutes_badge_count_but_not_acknowledge_all(self, client, api_storage):
+        ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        api_storage.save_event(ts, "warning", "cm_packet_loss_warning", "Loss")
+        api_storage.save_event(ts, "warning", "power_change", "Power change")
+        current_runtime().config_manager.save(
+            {"events_badge_muted_types": json.dumps(["cm_packet_loss_warning"])}
+        )
+        data = json.loads(client.get("/api/events").data)
+        assert len(data["events"]) == 2
+        # unacknowledged_count drives the acknowledge-all button and stays complete
+        assert data["unacknowledged_count"] == 2
+        assert data["badge_count"] == 1
+
+    def test_events_list_badge_count_matches_unack_without_muted_types(self, client, api_storage):
+        ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        api_storage.save_event(ts, "warning", "cm_packet_loss_warning", "Loss")
+        data = json.loads(client.get("/api/events").data)
+        assert data["unacknowledged_count"] == 1
+        assert data["badge_count"] == 1
+
+    def test_events_count_ignores_malformed_badge_mute_config(self, client, api_storage):
+        ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        api_storage.save_event(ts, "warning", "cm_packet_loss_warning", "Loss")
+        current_runtime().config_manager.save({"events_badge_muted_types": "not json"})
+        assert json.loads(client.get("/api/events/count").data)["count"] == 1
+
+    def test_acknowledge_all_covers_muted_events(self, client, api_storage):
+        ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        api_storage.save_event(ts, "warning", "cm_packet_loss_warning", "Loss")
+        current_runtime().config_manager.save(
+            {"events_badge_muted_types": json.dumps(["cm_packet_loss_warning"])}
+        )
+        resp = client.post("/api/events/acknowledge-all")
+        assert json.loads(resp.data)["count"] == 1
+        assert api_storage.get_event_count(acknowledged=0) == 0
 
 
 # ── save_events_with_ids ──

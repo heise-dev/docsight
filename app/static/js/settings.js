@@ -491,6 +491,12 @@ function getFormData() {
         }
     });
     data.notify_cooldowns = JSON.stringify(cooldowns);
+    var badgeMuted = [];
+    document.querySelectorAll('.badge-event-row').forEach(function(row) {
+        var toggle = row.querySelector('.badge-count-toggle');
+        if (toggle && !toggle.checked) badgeMuted.push(row.getAttribute('data-event'));
+    });
+    data.events_badge_muted_types = JSON.stringify(badgeMuted);
     return data;
 }
 
@@ -1695,6 +1701,17 @@ function initNotificationCooldownControls() {
     } catch(e) {}
 }
 
+function initEventBadgeControls() {
+    try {
+        var muted = typeof savedBadgeMutedTypes !== 'undefined' && savedBadgeMutedTypes ? savedBadgeMutedTypes : [];
+        document.querySelectorAll('.badge-event-row').forEach(function(row) {
+            var toggle = row.querySelector('.badge-count-toggle');
+            if (!toggle) return;
+            toggle.checked = muted.indexOf(row.getAttribute('data-event')) === -1;
+        });
+    } catch(e) {}
+}
+
 /* ── Init ── */
 document.addEventListener('DOMContentLoaded', function() {
     if (typeof lucide !== 'undefined') lucide.createIcons();
@@ -1704,6 +1721,7 @@ document.addEventListener('DOMContentLoaded', function() {
     initUnsavedDetection();
     initInstantSettingsToggles();
     initNotificationCooldownControls();
+    initEventBadgeControls();
     refreshPwaPushStatus();
     initTimezoneHint();
     onIspChange();
