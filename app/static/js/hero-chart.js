@@ -9,6 +9,25 @@
 
     var heroChartInstance = null;
     var heroResizeObs = null;
+    var pendingTrends = Object.create(null);
+
+    /* The hero chart and the metric sparklines render the same payload, so a
+       page load or an auto-refresh must request /api/trends once, not twice.
+       The promise is dropped as soon as it settles, so a later refresh refetches. */
+    function loadTrends(range) {
+        if (pendingTrends[range]) return pendingTrends[range];
+        var request = fetch(docsightUrl('/api/trends?range=' + range))
+            .then(function(r) {
+                if (!r.ok) throw new Error('API error: ' + r.status);
+                return r.json();
+            });
+        var settled = function() { delete pendingTrends[range]; };
+        request.then(settled, settled);
+        pendingTrends[range] = request;
+        return request;
+    }
+
+    window.docsightLoadTrends = loadTrends;
 
     function getThemeColors() {
         var isDark = document.documentElement.getAttribute('data-theme') !== 'light';
@@ -50,11 +69,7 @@
         if (!container) return;
 
         // The hero card is a 24h sparkline, so fetch the normalized 1d trend range directly.
-        fetch(docsightUrl('/api/trends?range=1d'))
-            .then(function(r) {
-                if (!r.ok) throw new Error('API error: ' + r.status);
-                return r.json();
-            })
+        loadTrends('1d')
             .then(function(data) {
                 if (!data || !Array.isArray(data) || data.length === 0) {
                     renderEmptyChart(container);

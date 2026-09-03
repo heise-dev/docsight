@@ -87,9 +87,16 @@
         ctx.stroke();
     }
 
+    /* Share the hero chart's in-flight /api/trends request when it is loaded;
+       range 1d is what the plain endpoint defaults to. */
+    function loadTrends() {
+        if (typeof window.docsightLoadTrends === 'function') return window.docsightLoadTrends('1d');
+        return fetch(docsightUrl('/api/trends?range=1d'))
+            .then(function(r) { return r.ok ? r.json() : Promise.reject(r.status); });
+    }
+
     function refresh() {
-        fetch(docsightUrl('/api/trends'))
-            .then(function(r) { return r.ok ? r.json() : Promise.reject(r.status); })
+        loadTrends()
             .then(function(data) {
                 if (!Array.isArray(data) || data.length === 0) return;
 
