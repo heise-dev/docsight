@@ -710,6 +710,87 @@ class ConnectionMonitorStorage:
     # polls is still one outage, and no setting caps poll_interval_ms.
     _RAW_COVERAGE_GAP = 3600
 
+    # More runs than this in one window is a flapping link, not a list of
+    # outages: seeking run by run then costs more than reading the window row
+    # by row, so the row walk takes over.
+    _MAX_TIMEOUT_RUNS = 1000
+
+    def _timeout_runs(
+        self,
+        target_id: int,
+        start: float | None,
+        end: float | None,
+        max_gap: float | None = None,
+    ) -> list[dict] | None:
+        """Maximal runs of consecutive timeout samples, found by seeking.
+
+        Two indexed seeks and one COUNT per run rather than one Python row per
+        sample: the first timeout at or after the cursor opens a run, the first
+        successful sample after it closes it, and every row in between is a
+        timeout by construction. Rows sharing a timestamp are ordered by id,
+        the order the index hands the row walk them in.
+
+        Returns None when the window holds more than _MAX_TIMEOUT_RUNS runs, or
+        when a run reaches wider than max_gap - a caller that cuts runs at gaps
+        in raw coverage has to walk those windows row by row to place the cut.
+        """
+        runs: list[dict] = []
+        cursor_ts, cursor_id = start, None
+        with self._read() as conn:
+            while True:
+                where, params = self._build_sample_where(target_id, start=cursor_ts, end=end)
+                clauses = f"{where} AND timeout <> 0"
+                if cursor_id is not None:
+                    clauses += " AND (timestamp > ? OR id > ?)"
+                    params = [*params, cursor_ts, cursor_id]
+                opening = conn.execute(
+                    f"SELECT timestamp, id FROM connection_samples WHERE {clauses}"
+                    " ORDER BY timestamp LIMIT 1",
+                    params,
+                ).fetchone()
+                if opening is None:
+                    return runs
+
+                run_start = opening["timestamp"]
+                where, params = self._build_sample_where(target_id, start=run_start, end=end)
+                closing = conn.execute(
+                    f"SELECT timestamp, id FROM connection_samples WHERE {where}"
+                    " AND timeout = 0 AND (timestamp > ? OR id > ?)"
+                    " ORDER BY timestamp LIMIT 1",
+                    [*params, run_start, opening["id"]],
+                ).fetchone()
+
+                run_end = closing["timestamp"] if closing is not None else None
+                where, params = self._build_sample_where(
+                    target_id, start=run_start, end=end if run_end is None else run_end,
+                )
+                clauses = f"{where} AND (timestamp > ? OR id >= ?)"
+                params = [*params, run_start, opening["id"]]
+                if closing is not None:
+                    clauses += " AND (timestamp < ? OR id < ?)"
+                    params = [*params, run_end, closing["id"]]
+                totals = conn.execute(
+                    "SELECT COUNT(*) AS timeout_count, MAX(timestamp) AS last_ts"
+                    f" FROM connection_samples WHERE {clauses}",
+                    params,
+                ).fetchone()
+
+                if max_gap is not None and (
+                    (run_end if run_end is not None else totals["last_ts"]) - run_start
+                ) > max_gap:
+                    return None
+                runs.append({
+                    "start": run_start,
+                    "end": run_end,
+                    "last_ts": totals["last_ts"],
+                    "timeout_count": totals["timeout_count"],
+                })
+                if closing is None:
+                    return runs
+                if len(runs) > self._MAX_TIMEOUT_RUNS:
+                    return None
+                cursor_ts, cursor_id = run_end, closing["id"]
+
     def _raw_outage_candidates(
         self,
         target_id: int,
@@ -720,6 +801,21 @@ class ConnectionMonitorStorage:
         target = self.get_target(target_id)
         poll_interval_ms = (target or {}).get("poll_interval_ms") or 0
         max_gap = max(self._RAW_COVERAGE_GAP, 5 * poll_interval_ms / 1000.0)
+
+        runs = self._timeout_runs(target_id, start, end, max_gap=max_gap)
+        if runs is not None:
+            # No run reaches over a coverage gap, so no segment can cut one and
+            # the newest run is the one in the newest segment.
+            return [{
+                "start": run["start"],
+                "end": run["end"] if run["end"] is not None else run["last_ts"],
+                "duration_end": run["end"] if run["end"] is not None else run["last_ts"],
+                "timeout_count": run["timeout_count"],
+                "approximate": False,
+                "bucket_seconds": None,
+                # no terminating sample, so this run may still be open
+                "open": run["end"] is None,
+            } for run in runs]
 
         where, params = self._build_sample_where(target_id, start=start, end=end)
         with self._read() as conn:
@@ -833,6 +929,19 @@ class ConnectionMonitorStorage:
         end: float | None,
     ) -> list[dict]:
         """Derive outages from consecutive timeout sequences in raw samples."""
+        runs = self._timeout_runs(target_id, start, end)
+        if runs is not None:
+            return [{
+                "start": run["start"],
+                # a run without a terminating sample is still running
+                "end": run["end"],
+                "duration_seconds": round(
+                    (run["end"] if run["end"] is not None else run["last_ts"])
+                    - run["start"], 1,
+                ),
+                "timeout_count": run["timeout_count"],
+            } for run in runs if run["timeout_count"] >= threshold]
+
         clauses = ["target_id = ?"]
         params: list[object] = [target_id]
         if start is not None:
